@@ -3,8 +3,11 @@ from sqlalchemy.orm import Session
 from datetime import date
 from typing import Dict, Any
 from app.database import get_db
+from app.services.schedule import ScheduleService
 from app.schemas import ScheduleGenerateResponse, ModifySlotRequest, QuickActionRequest
+import logging
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
@@ -21,21 +24,20 @@ def generate_schedule(
     """
     Generate optimal schedule for week using OR-Tools solver.
     """
-    try:
-        # TODO: Implement full solver logic
-        # For now, return placeholder
+    scuola_id = _get_current_school_id()
 
-        return ScheduleGenerateResponse(
-            status="generated",
-            schedule_id="sch_001",
-            quality_score=73.0,
-            quality_level="B",
-            n_soft_conflicts=2,
-            slots=[],
+    try:
+        service = ScheduleService(db)
+        result = service.generate_schedule(
+            scuola_id=scuola_id,
+            week_start=week_start,
+            timeout_seconds=60,
         )
+        return result
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error generating schedule: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/schedule/{week_start}")
@@ -46,12 +48,19 @@ def get_schedule(
     """
     Retrieve schedule for week.
     """
-    # TODO: Implement get schedule logic
+    scuola_id = _get_current_school_id()
 
-    return {
-        "status": "not_found",
-        "message": "Schedule not found",
-    }
+    try:
+        service = ScheduleService(db)
+        result = service.get_schedule(
+            scuola_id=scuola_id,
+            week_start=week_start,
+        )
+        return result
+
+    except Exception as e:
+        logger.error(f"Error retrieving schedule: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/schedule/{week_start}/quality-score")
