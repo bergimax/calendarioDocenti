@@ -34,7 +34,7 @@ class ParsedIntent:
 
 class ChatNLP:
     """
-    Parse admin messages into structured intents using Claude API.
+    Parse admin messages into structured intents using pattern matching or Claude API.
     Supports function calling for intent extraction.
     """
 
@@ -49,20 +49,36 @@ class ChatNLP:
             IntentType.ADD_PREFERENCE,
         ]
 
-    def parse_message(self, message: str, context: Optional[Dict[str, Any]] = None) -> ParsedIntent:
+    def parse_message(self, message: str, context: Optional[Dict[str, Any]] = None, use_llm: bool = False) -> ParsedIntent:
         """
         Parse admin message into intent + parameters.
 
         Args:
             message: Admin's natural language request
             context: Optional context (schedule state, available classes/teachers, etc)
+            use_llm: If True and client available, use Claude API with function calling
 
         Returns:
             ParsedIntent with extracted intent and parameters
         """
         logger.info(f"Parsing message: {message}")
 
-        # Pattern matching as fallback (no LLM required for MVP)
+        # Try LLM first if enabled and client available
+        if use_llm and self.client:
+            try:
+                return self._parse_with_llm(message, context)
+            except Exception as e:
+                logger.warning(f"LLM parsing failed, falling back to patterns: {e}")
+
+        # Pattern matching as fallback
+        return self._parse_with_patterns(message, context)
+
+    def _parse_with_llm(self, message: str, context: Optional[Dict[str, Any]] = None) -> ParsedIntent:
+        """Parse using Claude API with function calling."""
+        # TODO: Implement LLM function calling
+        # Use self.client.messages.create with tools parameter
+        # Define JSON schema for each intent type
+        logger.info("LLM parsing not yet implemented")
         return self._parse_with_patterns(message, context)
 
     def _parse_with_patterns(self, message: str, context: Optional[Dict[str, Any]] = None) -> ParsedIntent:

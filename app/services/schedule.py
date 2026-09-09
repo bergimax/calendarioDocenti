@@ -207,3 +207,94 @@ class ScheduleService:
 
         # Deduplicate
         return list(set(suggestions))
+
+    def approve_schedule(self, scuola_id: str, week_start: date) -> Dict[str, Any]:
+        """
+        Approve schedule (change from BOZZA to APPROVATO).
+        Lock from further modifications.
+        """
+        logger.info(f"Approving schedule for school {scuola_id} week {week_start}")
+
+        try:
+            schedule = self.repo.get_schedule_by_week(scuola_id, week_start)
+
+            if not schedule:
+                return {
+                    "status": "error",
+                    "message": "No schedule found for this week",
+                }
+
+            # Update stato to APPROVATO
+            from app.models import OrarioSettimanale, AuditLog
+
+            orario = self.db.query(OrarioSettimanale).filter(
+                OrarioSettimanale.scuola_id == scuola_id,
+                OrarioSettimanale.data_inizio == week_start,
+            ).first()
+
+            if orario:
+                old_stato = orario.stato
+                orario.stato = "APPROVATO"
+                self.db.commit()
+
+                # Audit log
+                audit = AuditLog(
+                    scuola_id=scuola_id,
+                    azione=f"SCHEDULE_APPROVED",
+                    dettagli=f"Changed from {old_stato} to APPROVATO",
+                )
+                self.db.add(audit)
+                self.db.commit()
+
+                logger.info(f"Schedule approved: {orario.id}")
+
+                return {
+                    "status": "approved",
+                    "schedule_id": orario.id,
+                    "stato": "APPROVATO",
+                }
+
+            return {
+                "status": "error",
+                "message": "Schedule not found in DB",
+            }
+
+        except Exception as e:
+            logger.error(f"Error approving schedule: {e}")
+            self.db.rollback()
+            return {
+                "status": "error",
+                "message": str(e),
+            }
+
+    def export_pdf(self, scuola_id: str, week_start: date) -> Dict[str, Any]:
+        """
+        Export schedule to PDF tabellone.
+        TODO: Implement WeasyPrint rendering for actual PDF generation.
+        """
+        logger.info(f"Exporting schedule to PDF: school {scuola_id} week {week_start}")
+
+        try:
+            schedule = self.repo.get_schedule_by_week(scuola_id, week_start)
+
+            if not schedule:
+                return {
+                    "status": "error",
+                    "message": "No schedule found for this week",
+                }
+
+            # TODO: Generate PDF using WeasyPrint
+            # For now, return placeholder
+
+            return {
+                "status": "generated",
+                "filename": f"orario_{week_start}.pdf",
+                "message": "PDF export not yet implemented (WeasyPrint integration pending)",
+            }
+
+        except Exception as e:
+            logger.error(f"Error exporting PDF: {e}")
+            return {
+                "status": "error",
+                "message": str(e),
+            }

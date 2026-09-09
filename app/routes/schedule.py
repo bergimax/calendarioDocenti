@@ -133,15 +133,18 @@ def approve_schedule(
     Approve schedule (change from BOZZA to APPROVATO).
     Lock from modifications.
     """
-    try:
-        # TODO: Implement approve logic
+    scuola_id = _get_current_school_id()
 
-        return {
-            "status": "approved",
-            "stato": "APPROVATO",
-        }
+    try:
+        service = ScheduleService(db)
+        result = service.approve_schedule(
+            scuola_id=scuola_id,
+            week_start=week_start,
+        )
+        return result
 
     except Exception as e:
+        logger.error(f"Error approving schedule: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -153,14 +156,16 @@ def export_pdf(
     """
     Export schedule to PDF tabellone.
     """
-    try:
-        # TODO: Implement PDF export logic
+    scuola_id = _get_current_school_id()
 
-        return {
-            "status": "generated",
-            "pdf_url": "https://...",
-            "filename": f"orario_{week_start}.pdf",
-        }
+    try:
+        service = ScheduleService(db)
+        result = service.export_pdf(
+            scuola_id=scuola_id,
+            week_start=week_start,
+        )
+        return result
 
     except Exception as e:
+        logger.error(f"Error exporting PDF: {e}")
         raise HTTPException(status_code=500, detail=str(e))
