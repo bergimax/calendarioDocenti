@@ -1,0 +1,294 @@
+from pydantic import BaseModel, Field, EmailStr
+from typing import List, Dict, Optional, Any
+from datetime import date, datetime
+from enum import Enum
+
+
+# Enums
+class DocenteTipo(str, Enum):
+    ASSUNTO = "ASSUNTO"
+    CONTRATTO = "CONTRATTO"
+
+
+class MateriaTipo(str, Enum):
+    TEORIA = "TEORIA"
+    PRATICA = "PRATICA"
+
+
+class PesoCognitivo(str, Enum):
+    ALTO = "ALTO"
+    MEDIO = "MEDIO"
+    BASSO = "BASSO"
+
+
+class Giorno(str, Enum):
+    LUNEDI = "LUNEDI"
+    MARTEDI = "MARTEDI"
+    MERCOLEDI = "MERCOLEDI"
+    GIOVEDI = "GIOVEDI"
+    VENERDI = "VENERDI"
+
+
+class OrarioStato(str, Enum):
+    BOZZA = "BOZZA"
+    APPROVATO = "APPROVATO"
+
+
+class QualityLevel(str, Enum):
+    A = "A"
+    B = "B"
+    C = "C"
+
+
+# ===== Availability Schemas =====
+
+class HourSlot(BaseModel):
+    """Single hour slot availability."""
+    ora_inizio: str  # "08:00"
+    ora_fine: str    # "09:00"
+    disponibile: bool
+
+
+class GiorniFasceDict(BaseModel):
+    """Dictionary of day -> list of hour slots."""
+    lunedi: List[HourSlot]
+    martedi: List[HourSlot]
+    mercoledi: List[HourSlot]
+    giovedi: List[HourSlot]
+    venerdi: List[HourSlot]
+
+
+class AvailabilityResponse(BaseModel):
+    """Response for get/save availability."""
+    teacher_id: str
+    week_start: date
+    giorni_fasce: Dict[str, List[Dict[str, Any]]]
+    is_default: Optional[bool] = False
+    is_inherited: Optional[bool] = False
+
+    class Config:
+        from_attributes = True
+
+
+class AvailabilitySaveRequest(BaseModel):
+    """Request to save availability."""
+    giorni_fasce: Dict[str, List[Dict[str, Any]]]
+
+
+# ===== Setup Schemas =====
+
+class FileUploadResponse(BaseModel):
+    """Response from file upload."""
+    status: str
+    file_id: str
+    file_type: str
+    preview: Optional[Dict[str, Any]] = None
+
+
+class ValidationWarning(BaseModel):
+    """Validation warning."""
+    field: Optional[str] = None
+    row: Optional[int] = None
+    docente: Optional[str] = None
+    issue: str
+    suggestion: Optional[str] = None
+
+
+class ValidationError(BaseModel):
+    """Validation error."""
+    type: str
+    message: str
+
+
+class FileValidationResult(BaseModel):
+    """Validation result per file type."""
+    success: bool
+    preview: Optional[Dict[str, Any]] = None
+    warnings: List[ValidationWarning] = []
+    errors: List[ValidationError] = []
+
+
+class SetupValidationResponse(BaseModel):
+    """Response from setup validation."""
+    status: str
+    results: Dict[str, FileValidationResult]
+    overall_status: str
+    can_proceed: bool
+
+
+class FieldValidationRequest(BaseModel):
+    """Request for field validation."""
+    file_type: str
+    entity: str
+    field: str
+    new_value: str
+
+
+class FieldValidationResponse(BaseModel):
+    """Response for field validation."""
+    valid: bool
+    message: str
+    suggestions: List[str] = []
+
+
+class CorrectionRequest(BaseModel):
+    """Request to apply correction."""
+    file_id: str
+    correction: Dict[str, Any]
+
+
+class SetupSaveRequest(BaseModel):
+    """Request to save setup data."""
+    file_ids: List[str]
+    corrections_applied: List[Dict[str, Any]] = []
+    school_name: str
+    school_year: str
+    data_inizio: Optional[date] = None
+    data_fine: Optional[date] = None
+
+
+class SetupSaveResponse(BaseModel):
+    """Response from setup save."""
+    status: str
+    school_id: Optional[str] = None
+    next_page: Optional[str] = None
+    message: Optional[str] = None
+
+
+# ===== Schedule Schemas =====
+
+class SlotLezioneCreate(BaseModel):
+    """Slot creation data."""
+    classe_id: str
+    docente_id: str
+    materia_id: str
+    giorno: Giorno
+    ora_inizio: int
+    ora_fine: int
+    accoppiata: bool = False
+    classe_accoppiata_id: Optional[str] = None
+
+
+class SlotLezioneResponse(BaseModel):
+    """Slot response."""
+    slot_id: str
+    classe_id: str
+    docente_id: str
+    materia_id: str
+    giorno: Giorno
+    ora_inizio: int
+    ora_fine: int
+    accoppiata: bool
+    classe_accoppiata_id: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class ScheduleGenerateResponse(BaseModel):
+    """Response from schedule generation."""
+    status: str  # "generated", "infeasible", "timeout", "error"
+    schedule_id: Optional[str] = None
+    quality_score: Optional[float] = None
+    quality_level: Optional[QualityLevel] = None
+    n_soft_conflicts: Optional[int] = None
+    slots: Optional[List[SlotLezioneResponse]] = None
+    message: Optional[str] = None
+    conflicting_constraints: Optional[List[str]] = None
+    suggested_deroghe: Optional[List[str]] = None
+
+
+class ModifySlotRequest(BaseModel):
+    """Request to modify slot."""
+    slot_id: str
+    changes: Dict[str, Any]  # docente_id, giorno, ora_inizio, etc
+
+
+class QuickActionRequest(BaseModel):
+    """Request to apply quick action."""
+    action_type: str  # "force_3_hours_theory", "reduce_contract", etc
+    class_id: Optional[str] = None
+    teacher_id: Optional[str] = None
+    parameters: Optional[Dict[str, Any]] = None
+
+
+# ===== Chat Schemas =====
+
+class ChatMessageCreate(BaseModel):
+    """Chat message creation."""
+    schedule_id: str
+    message: str
+
+
+class ChatMessageResponse(BaseModel):
+    """Chat message response."""
+    id: str
+    ruolo: str  # "ADMIN" or "AI"
+    messaggio: str
+    timestamp: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class ChatHistoryResponse(BaseModel):
+    """Chat history response."""
+    messages: List[ChatMessageResponse]
+
+
+# ===== Approval & Export Schemas =====
+
+class ApproveScheduleResponse(BaseModel):
+    """Response from approve."""
+    status: str
+    schedule_id: str
+    stato: OrarioStato
+    approved_at: Optional[datetime] = None
+
+
+class ExportPDFResponse(BaseModel):
+    """Response from PDF export."""
+    status: str
+    pdf_url: str
+    filename: str
+
+
+# ===== Data Management Schemas =====
+
+class DocentiListResponse(BaseModel):
+    """Response for list docenti."""
+    id: str
+    nome: str
+    email: Optional[str]
+    tipo: DocenteTipo
+    active: bool
+
+    class Config:
+        from_attributes = True
+
+
+class DocentiCreateRequest(BaseModel):
+    """Request to create docente."""
+    nome: str
+    email: Optional[str] = None
+    tipo: DocenteTipo
+
+
+class CalendarioCreateRequest(BaseModel):
+    """Request to add calendar date."""
+    data: date
+    ore_max_giornata: int = 5
+    flag_chiusura: bool = False
+    flag_stage_classe_id: Optional[str] = None
+
+
+class CalendarioResponse(BaseModel):
+    """Calendar date response."""
+    id: str
+    data: date
+    ore_max_giornata: int
+    flag_chiusura: bool
+    flag_stage_classe_id: Optional[str]
+
+    class Config:
+        from_attributes = True
