@@ -36,6 +36,20 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 Documentazione interattiva su `http://localhost:8000/docs`. Tutti gli endpoint sono
 sotto il prefisso `/api` (es. `POST /api/schedule/generate`), tranne `GET /health`.
 
+### Test automatici (backend)
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+I test in [`tests/`](tests) girano contro un file SQLite temporaneo (nessun PostgreSQL
+richiesto) e coprono: solver OR-Tools (vincoli rigidi/soft, classi accoppiate, giorni di
+chiusura/stage), parsing NLP della chat, validazione dati di setup, e tutti gli endpoint
+`/api/*` end-to-end (setup → disponibilità → generazione/approvazione orario → chat).
+Diversi test sono di regressione su bug già corretti (es. classi accoppiate mai
+schedulate, pesi dei vincoli soft ignorati, `scuola_id` non coerente dopo il setup).
+
 Nota: v1 è single-tenant e admin-only — non c'è ancora autenticazione, tutte le route
 usano una `scuola_id` fissa (`"sch_1"`) impostata durante `/api/setup/save`.
 
