@@ -41,41 +41,78 @@ class SetupService:
             "gruppi": gruppi,
         }
 
-    def ingest_calendar_file(self, filename: str, content: bytes) -> Dict[str, Any]:
+    @staticmethod
+    def _preview_for(file_type: str, parsed: List[Dict[str, Any]]) -> Dict[str, Any]:
+        if file_type == "calendario":
+            return SetupService._calendario_preview(parsed)
+        if file_type == "docenti":
+            return {
+                "count": len(parsed),
+                "assunti": sum(1 for p in parsed if p["tipo"] == "ASSUNTO"),
+                "contratti": sum(1 for p in parsed if p["tipo"] == "CONTRATTO"),
+            }
+        return {"count": len(parsed)}
+
+    def ingest_file(self, file_type: str, filename: str, content: bytes) -> Dict[str, Any]:
         """
-        Parse a calendar file (CSV or PDF, specs.md 3.1) uploaded ahead of
-        the main /api/setup/validate call, and cache the result so it's
-        picked up automatically by parse_and_validate_files() even though
-        the calendario field is absent from that call's JSON body.
+        Parse an uploaded setup file (one of calendario/docenti/classi/materie/
+        assegnazioni/accoppiamenti) ahead of the main /api/setup/validate call,
+        and cache the result under file_type so parse_and_validate_files()
+        picks it up automatically without needing that field in its JSON body
+        (the frontend instead sends the file_ids it got back from each upload;
+        since this service instance is a single-flow-at-a-time singleton -
+        see routes/setup.py - the cache alone is enough to resolve them).
+
+        calendario is the only file type that accepts PDF as well as CSV
+        (specs.md 3.1); everything else is CSV-only for now.
         """
         lower_name = filename.lower()
 
-        if lower_name.endswith(".pdf"):
+        if file_type == "calendario" and lower_name.endswith(".pdf"):
             parsed = CalendarParser.parse_calendario_pdf(content)
-            file_type = "pdf"
+            content_type = "pdf"
         elif lower_name.endswith(".csv"):
-            parsed = CalendarParser.parse_calendar_csv(content.decode("utf-8"))
-            file_type = "csv"
-        else:
+            parser_func = {
+                "calendario": CalendarParser.parse_calendar_csv,
+                "docenti": CalendarParser.parse_docenti_csv,
+                "classi": CalendarParser.parse_classi_csv,
+                "materie": CalendarParser.parse_materie_csv,
+                "assegnazioni": CalendarParser.parse_assegnazioni_csv,
+                "accoppiamenti": CalendarParser.parse_accoppiamenti_csv,
+            }.get(file_type)
+            if parser_func is None:
+                raise ValueError(f"Unknown file type: {file_type}")
+            parsed = parser_func(content.decode("utf-8"))
+            content_type = "csv"
+        elif file_type == "calendario":
             raise ValueError("Calendar file must be .csv or .pdf")
+        else:
+            raise ValueError(f"{file_type} file must be .csv")
 
-        self.parsed_data_cache["calendario"] = parsed
+        self.parsed_data_cache[file_type] = parsed
 
-        logger.info(f"Ingested calendar {file_type} '{filename}': {len(parsed)} entries")
+        logger.info(f"Ingested {file_type} {content_type} '{filename}': {len(parsed)} entries")
 
         return {
-            "file_type": file_type,
-            "preview": self._calendario_preview(parsed),
+            "file_type": content_type,
+            "preview": self._preview_for(file_type, parsed),
         }
 
     def parse_and_validate_files(
         self,
-        file_data: Dict[str, Optional[str]],
+        file_data: Dict[str, Any],
     ) -> SetupValidationResponse:
         """
         Parse all uploaded files and validate coherence.
 
-        file_data format: {
+        Preferred flow (matches the frontend): each file is uploaded first via
+        its own /api/*/upload endpoint (ingest_file()), and this call's body
+        just carries file_data={"file_ids": [...]} - the ids themselves are
+        not even inspected, since the already-parsed data lives in
+        self.parsed_data_cache by the time this runs.
+
+        Also supported directly (e.g. calling the API without uploading
+        first): file_data = {
             "calendario": "csv content",
             "docenti": "csv content",
             "classi": "csv content",
@@ -102,24 +139,29 @@ class SetupService:
         }
 
         for file_type, (parser_func, display_name) in file_parsers.items():
+            # A file may already have been parsed via its own /api/*/upload
+            # endpoint (ingest_file()) ahead of this call - the frontend
+            # sends file_ids rather than repeating raw CSV content here, and
+            # since SetupService is a single-flow-at-a-time singleton (see
+            # routes/setup.py) the cache alone is enough to resolve them, no
+            # need to actually look the ids up. Fall back to this call's own
+            # JSON body (raw CSV text) for direct/API-only usage.
+            already_parsed = self.parsed_data_cache.get(file_type)
             csv_content = file_data.get(file_type)
 
+            if already_parsed is not None:
+                parsed_data[file_type] = already_parsed
+                results[file_type] = FileValidationResult(
+                    success=True,
+                    preview=self._preview_for(file_type, already_parsed),
+                    warnings=[],
+                    errors=[],
+                )
+                continue
+
             if not csv_content:
-                # The calendar may have already been parsed (from a CSV or
-                # PDF upload) via ingest_calendar_file() / /api/calendar/upload,
-                # ahead of this JSON-body validate call - reuse it rather
-                # than reporting it as missing.
-                if file_type == "calendario" and self.parsed_data_cache.get("calendario"):
-                    parsed = self.parsed_data_cache["calendario"]
-                    parsed_data[file_type] = parsed
-                    results[file_type] = FileValidationResult(
-                        success=True,
-                        preview=self._calendario_preview(parsed),
-                        warnings=[],
-                        errors=[],
-                    )
                 # Optional file (accoppiamenti)
-                elif file_type == "accoppiamenti":
+                if file_type == "accoppiamenti":
                     results[file_type] = FileValidationResult(
                         success=True,
                         preview={"count": 0},
@@ -143,21 +185,9 @@ class SetupService:
                 parsed = parser_func(csv_content)
                 parsed_data[file_type] = parsed
 
-                # Build preview
-                if file_type == "calendario":
-                    preview = self._calendario_preview(parsed)
-                elif file_type == "docenti":
-                    preview = {
-                        "count": len(parsed),
-                        "assunti": sum(1 for p in parsed if p["tipo"] == "ASSUNTO"),
-                        "contratti": sum(1 for p in parsed if p["tipo"] == "CONTRATTO"),
-                    }
-                else:
-                    preview = {"count": len(parsed)}
-
                 results[file_type] = FileValidationResult(
                     success=True,
-                    preview=preview,
+                    preview=self._preview_for(file_type, parsed),
                     warnings=[],
                     errors=[],
                 )
