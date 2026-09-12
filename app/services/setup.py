@@ -295,12 +295,14 @@ class SetupService:
             data_inizio = data_inizio or date.today()
             data_fine = data_fine or date.today()
 
-            # Create school
+            # Create school (fixed scuola_id so every other endpoint, which is
+            # hardcoded to it in v1 single-tenant mode, can find this data)
             scuola = self.repo.create_school(
                 nome=school_name,
                 anno_formativo=school_year,
                 data_inizio_anno=data_inizio,
                 data_fine_anno=data_fine,
+                scuola_id=scuola_id,
             )
 
             logger.info(f"Created school: {scuola.id}")

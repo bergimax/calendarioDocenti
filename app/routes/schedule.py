@@ -4,7 +4,7 @@ from datetime import date
 from typing import Dict, Any
 from app.database import get_db
 from app.services.schedule import ScheduleService
-from app.schemas import ScheduleGenerateResponse, ModifySlotRequest, QuickActionRequest
+from app.schemas import ScheduleGenerateRequest, ScheduleGenerateResponse, ModifySlotRequest, QuickActionRequest
 import logging
 
 logger = logging.getLogger(__name__)
@@ -18,7 +18,7 @@ def _get_current_school_id() -> str:
 
 @router.post("/schedule/generate")
 def generate_schedule(
-    week_start: date,
+    request: ScheduleGenerateRequest,
     db: Session = Depends(get_db),
 ) -> ScheduleGenerateResponse:
     """
@@ -30,7 +30,7 @@ def generate_schedule(
         service = ScheduleService(db)
         result = service.generate_schedule(
             scuola_id=scuola_id,
-            week_start=week_start,
+            week_start=request.week_start,
             timeout_seconds=60,
         )
         return result

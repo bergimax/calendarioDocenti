@@ -140,7 +140,7 @@ class DataValidator:
         if tipo not in ["ASSUNTO", "CONTRATTO"]:
             return False, f"tipo must be ASSUNTO or CONTRATTO, got {tipo}"
 
-        email = docente.get("email", "").strip()
+        email = (docente.get("email") or "").strip()
         if email and "@" not in email:
             return False, f"invalid email format: {email}"
 

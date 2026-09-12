@@ -185,6 +185,12 @@ class SlotLezioneResponse(BaseModel):
         from_attributes = True
 
 
+class ScheduleGenerateRequest(BaseModel):
+    """Request to generate a weekly schedule."""
+    week_start: date
+    include_preferences: bool = True
+
+
 class ScheduleGenerateResponse(BaseModel):
     """Response from schedule generation."""
     status: str  # "generated", "infeasible", "timeout", "error"

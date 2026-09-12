@@ -229,7 +229,7 @@ class ScheduleService:
 
             orario = self.db.query(OrarioSettimanale).filter(
                 OrarioSettimanale.scuola_id == scuola_id,
-                OrarioSettimanale.data_inizio == week_start,
+                OrarioSettimanale.settimana_inizio == week_start,
             ).first()
 
             if orario:

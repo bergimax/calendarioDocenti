@@ -42,7 +42,9 @@ class Classe(Base):
     scuola = relationship("Scuola", back_populates="classi")
     assegnazioni = relationship("Assegnazione", back_populates="classe")
     monte_ore = relationship("MonteOreAnnuale", back_populates="classe")
-    slot_lezioni = relationship("SlotLezione", back_populates="classe")
+    slot_lezioni = relationship(
+        "SlotLezione", back_populates="classe", foreign_keys="[SlotLezione.classe_id]"
+    )
 
 
 class Docente(Base):
@@ -206,7 +208,9 @@ class SlotLezione(Base):
 
     # Relationships
     orario = relationship("OrarioSettimanale", back_populates="slot_lezioni")
-    classe = relationship("Classe", back_populates="slot_lezioni")
+    # foreign_keys is required: classe_id and classe_accoppiata_id are both FKs
+    # to classe.id, so SQLAlchemy can't otherwise tell which one this join uses.
+    classe = relationship("Classe", back_populates="slot_lezioni", foreign_keys=[classe_id])
     docente = relationship("Docente", back_populates="slot_lezioni")
     materia = relationship("Materia", back_populates="slot_lezioni")
 

@@ -47,6 +47,7 @@ class CalendarioDati:
     giorno: int  # 0-4
     ore_max_giornata: int
     flag_stage_classe_id: Optional[str] = None
+    flag_chiusura: bool = False
 
 
 @dataclass
@@ -58,6 +59,7 @@ class ScheduleContext:
     scuola_id: str
     week_start: date
     week_end: date
+    anno_fine: date  # end of the school's anno formativo (for weeks-remaining calc)
 
     # Core data
     assegnazioni: List[AssegnazioneDati]
@@ -113,7 +115,7 @@ class ScheduleSolver:
         if self.soft_penalties:
             self.model.Minimize(sum(penalty for penalty, _ in self.soft_penalties))
 
-        logger.info(f"Model built: {len(self.x)} variables, {self.model.NumConstraints()} constraints")
+        logger.info(f"Model built: {len(self.x)} variables, {len(self.model.Proto().constraints)} constraints")
         return self
 
     def _create_variables(self) -> None:
@@ -187,7 +189,8 @@ class ScheduleSolver:
                 if not cal_entry:
                     continue
 
-                ore_max = cal_entry.ore_max_giornata
+                # Closure days (holidays/extraordinary closures) have zero capacity
+                ore_max = 0 if cal_entry.flag_chiusura else cal_entry.ore_max_giornata
 
                 # Sum all hours for this classe/giorno
                 hours_in_day = [
@@ -388,8 +391,8 @@ class ScheduleSolver:
         """Soft: Minimize deviation from target hours per assegnazione (weight 15)."""
         weight = 15
 
-        # Calculate weeks remaining in year
-        weeks_in_year = (self.context.week_end - self.context.week_start).days // 7
+        # Calculate weeks remaining until end of the anno formativo
+        weeks_in_year = (self.context.anno_fine - self.context.week_start).days // 7
         if weeks_in_year <= 0:
             weeks_in_year = 1
 
@@ -443,16 +446,6 @@ class ScheduleSolver:
 
                 first_hour = min(all_hours)
                 last_hour = max(all_hours)
-
-                # Count gaps (0s between first and last)
-                gaps = 0
-                for ora in range(first_hour, last_hour):
-                    has_slot = any(
-                        self.x.get((asg.assegnazione_id, giorno, ora), None) == 1
-                        for asg in docente_asgs
-                    )
-                    if not has_slot:
-                        gaps += 1
 
                 # Add penalty for gaps
                 # Simplified: for each gap hour, add small penalty

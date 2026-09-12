@@ -4,7 +4,7 @@ from datetime import date, timedelta
 from typing import Optional, List
 from app.models import (
     OrarioSettimanale, SlotLezione, Assegnazione, Docente, Classe, Materia,
-    DisponibilitaSettimanale, CalendarioAnnuale, MonteOreAnnuale, ClasseAccoppiata
+    DisponibilitaSettimanale, CalendarioAnnuale, MonteOreAnnuale, ClasseAccoppiata, Scuola
 )
 from app.domain.solver import ScheduleContext, AssegnazioneDati, DisponibilitaDati, CalendarioDati
 import logging
@@ -26,6 +26,9 @@ class ScheduleRepository:
         logger.info(f"Building context for school {scuola_id} week {week_start}")
 
         week_end = week_start + timedelta(days=7)
+
+        scuola = self.db.query(Scuola).filter_by(id=scuola_id).first()
+        anno_fine = scuola.data_fine_anno if scuola else week_end
 
         # 1. Get all assegnazioni with related entities
         assegnazioni = self.db.query(Assegnazione).filter_by(scuola_id=scuola_id).all()
@@ -108,6 +111,7 @@ class ScheduleRepository:
                     giorno=giorno,
                     ore_max_giornata=cal.ore_max_giornata,
                     flag_stage_classe_id=cal.flag_stage_classe_id,
+                    flag_chiusura=cal.flag_chiusura,
                 )
                 calendario.append(cal_data)
 
@@ -146,6 +150,7 @@ class ScheduleRepository:
             scuola_id=scuola_id,
             week_start=week_start,
             week_end=week_end,
+            anno_fine=anno_fine,
             assegnazioni=assegnazioni_dati,
             disponibilita_map=disponibilita_map,
             calendario=calendario,

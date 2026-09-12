@@ -19,6 +19,34 @@ def _get_current_school_id() -> str:
     return "sch_1"
 
 
+@router.get("/availability/{week_start}/status")
+def check_availability_status(
+    week_start: date,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """
+    Check if all teachers have availability filled for week.
+    Returns status and counts.
+
+    NOTE: this route must stay registered before
+    GET /availability/{week_start}/{teacher_id}, otherwise FastAPI would match
+    "status" as a teacher_id and this endpoint would be unreachable.
+    """
+    scuola_id = _get_current_school_id()
+
+    try:
+        service = AvailabilityService(db)
+        result = service.check_week_status(
+            scuola_id=scuola_id,
+            week_start=week_start,
+        )
+        return result
+
+    except Exception as e:
+        logger.error(f"Error checking availability status: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
 @router.get("/availability/{week_start}/{teacher_id}")
 def get_availability(
     week_start: date,
@@ -111,28 +139,4 @@ def copy_availability_from_previous_week(
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Error copying availability: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
-
-
-@router.get("/availability/{week_start}/status")
-def check_availability_status(
-    week_start: date,
-    db: Session = Depends(get_db),
-) -> Dict[str, Any]:
-    """
-    Check if all teachers have availability filled for week.
-    Returns status and counts.
-    """
-    scuola_id = _get_current_school_id()
-
-    try:
-        service = AvailabilityService(db)
-        result = service.check_week_status(
-            scuola_id=scuola_id,
-            week_start=week_start,
-        )
-        return result
-
-    except Exception as e:
-        logger.error(f"Error checking availability status: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")

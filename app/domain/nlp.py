@@ -220,15 +220,31 @@ class ChatNLP:
         return match.group(1) if match else None
 
     def _extract_day(self, message: str, context: Optional[Dict[str, Any]] = None, position: str = None) -> Optional[str]:
-        """Extract day name."""
+        """
+        Extract day name. When the message mentions two different days (e.g.
+        "dal martedi al mercoledi"), `position` picks which one: "from" returns
+        the first day mentioned, "to" returns the last (distinct) one mentioned.
+        """
         days = ["lunedi", "martedi", "mercoledi", "giovedi", "venerdi",
                 "monday", "tuesday", "wednesday", "thursday", "friday",
                 "lun", "mar", "mer", "gio", "ven"]
         msg_lower = message.lower()
-        for day in days:
-            if day in msg_lower:
-                return day
-        return None
+
+        found = []
+        for word in msg_lower.split():
+            cleaned = word.strip(".,;:!?")
+            for day in days:
+                if cleaned == day or cleaned.startswith(day):
+                    if not found or found[-1] != day:
+                        found.append(day)
+                    break
+
+        if not found:
+            return None
+
+        if position == "to":
+            return found[-1]
+        return found[0]
 
     def _extract_teacher(self, message: str, context: Optional[Dict[str, Any]] = None) -> Optional[str]:
         """Extract teacher name."""

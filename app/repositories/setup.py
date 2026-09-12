@@ -20,15 +20,33 @@ class SetupRepository:
         anno_formativo: str,
         data_inizio_anno: datetime,
         data_fine_anno: datetime,
+        scuola_id: Optional[str] = None,
     ) -> Scuola:
-        """Create new school."""
-        scuola = Scuola(
-            nome=nome,
-            anno_formativo=anno_formativo,
-            data_inizio_anno=data_inizio_anno,
-            data_fine_anno=data_fine_anno,
-        )
-        self.db.add(scuola)
+        """
+        Create new school, or update it in place if scuola_id already exists.
+        v1 is single-tenant: the caller passes a fixed scuola_id (e.g. "sch_1") so
+        every other endpoint (hardcoded to that id) can find the data afterwards.
+        """
+        scuola = None
+        if scuola_id:
+            scuola = self.db.query(Scuola).filter_by(id=scuola_id).first()
+
+        if scuola:
+            scuola.nome = nome
+            scuola.anno_formativo = anno_formativo
+            scuola.data_inizio_anno = data_inizio_anno
+            scuola.data_fine_anno = data_fine_anno
+        else:
+            scuola = Scuola(
+                nome=nome,
+                anno_formativo=anno_formativo,
+                data_inizio_anno=data_inizio_anno,
+                data_fine_anno=data_fine_anno,
+            )
+            if scuola_id:
+                scuola.id = scuola_id
+            self.db.add(scuola)
+
         self.db.flush()
         return scuola
 

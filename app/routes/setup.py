@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status
 from sqlalchemy.orm import Session
 from datetime import date
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from app.database import get_db
 from app.services.setup import SetupService
 from app.schemas import (
@@ -17,9 +17,12 @@ import logging
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-# Global service instance for setup flow (session-scoped cache)
-# In production, use proper session management
-_setup_service: Dict[str, SetupService] = {}
+# Single service instance holding the in-progress setup wizard state.
+# v1 is single-tenant/admin-only (one setup flow at a time), so a module-level
+# singleton is used instead of a dict keyed by id(db): that id is a memory
+# address which Python can and does reuse once a previous Session is garbage
+# collected, so two unrelated requests could otherwise share cached data.
+_setup_service: Optional[SetupService] = None
 
 
 def _get_current_school_id() -> str:
@@ -28,11 +31,14 @@ def _get_current_school_id() -> str:
 
 
 def _get_setup_service(db: Session) -> SetupService:
-    """Get or create SetupService for this session."""
-    session_id = id(db)  # Use DB session id as session identifier
-    if session_id not in _setup_service:
-        _setup_service[session_id] = SetupService(db)
-    return _setup_service[session_id]
+    """Get or create the SetupService for the in-progress setup flow."""
+    global _setup_service
+    if _setup_service is None:
+        _setup_service = SetupService(db)
+    else:
+        _setup_service.db = db
+        _setup_service.repo.db = db
+    return _setup_service
 
 
 @router.post("/calendar/upload")
@@ -130,10 +136,9 @@ def save_setup_data(
             data_fine=request.data_fine,
         )
 
-        # Clean up service instance
-        session_id = id(db)
-        if session_id in _setup_service:
-            del _setup_service[session_id]
+        # Clean up service instance so the next setup flow starts fresh
+        global _setup_service
+        _setup_service = None
 
         return result
 
