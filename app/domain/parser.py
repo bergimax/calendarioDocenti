@@ -446,3 +446,191 @@ class CalendarParser:
         except Exception as e:
             logger.error(f"Error parsing paired classes CSV: {e}")
             raise
+
+
+# Italian day names, in app order (0=lunedì..4=venerdì). Index-paired lists:
+# the no-accent lowercase form is the app's own convention (see
+# DisponibilitaSettimanale.giorni_fasce keys); the accented form is what
+# actually appears in these school PDFs.
+GIORNI_ORDINE = ["lunedi", "martedi", "mercoledi", "giovedi", "venerdi"]
+GIORNI_ACCENTATI = ["lunedì", "martedì", "mercoledì", "giovedì", "venerdì"]
+
+ROMANO_A_GRUPPO = {"I": "PRIME", "II": "SECONDE", "III": "TERZE", "IV": "QUARTE"}
+
+
+class SchoolRosterParser:
+    """
+    Parse the two ancillary real-world PDFs used by scripts/import_documenti.py
+    to bootstrap docente/classe/assegnazione/disponibilita data for an actual
+    school: a "Docente -> Aula assegnata" roster, and a weekly timetable PDF
+    (from which classi, docente-classe associations, and docente availability
+    are all derived - see that script's module docstring for the reasoning).
+
+    Unlike CalendarParser.parse_calendario_pdf, both of these use clean
+    bordered tables that pdfplumber's own table-grid detection extracts
+    reliably, so no custom word-position clustering is needed here.
+    """
+
+    @staticmethod
+    def parse_elenco_docenti_pdf(file_bytes: bytes) -> List[Dict[str, Any]]:
+        """
+        Parse a "Docente | Aula/Laboratorio | Piano" roster PDF.
+        Rows whose first column isn't a "COGNOME NOME" person name (e.g. a
+        generic lab label like "LAB. INFORMATICO" used as a placeholder row
+        in place of a docente) are skipped.
+        """
+        import pdfplumber
+
+        logger.info("Parsing docenti roster from PDF")
+        entries: List[Dict[str, Any]] = []
+
+        try:
+            with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+                for page in pdf.pages:
+                    for table in page.find_tables():
+                        for row in table.extract():
+                            if not row or not row[0]:
+                                continue
+                            nome_completo = row[0].strip()
+                            if not nome_completo or nome_completo.upper().startswith("LAB."):
+                                continue
+                            parts = nome_completo.split()
+                            if len(parts) < 2:
+                                continue
+                            entries.append({
+                                "nome_completo": nome_completo,
+                                "cognome": parts[0].upper(),
+                                "aula": (row[1] or "").strip() if len(row) > 1 else None,
+                                "piano": (row[2] or "").strip() if len(row) > 2 else None,
+                            })
+
+            logger.info(f"Parsed {len(entries)} docenti from roster PDF")
+            return entries
+
+        except Exception as e:
+            logger.error(f"Error parsing docenti roster PDF: {e}")
+            raise
+
+    @staticmethod
+    def _normalize_giorno(raw: Optional[str]) -> Optional[str]:
+        """
+        Match a (possibly garbled) day-name cell against the 5 known Italian
+        weekdays. Rotated/vertical text in this PDF's left margin sometimes
+        comes out with every letter doubled (e.g. "mmaarrtteeddìì" for
+        "martedì") - trying both the raw and de-doubled (every other char)
+        forms handles that without depending on it happening consistently.
+        """
+        if not raw:
+            return None
+        raw = raw.strip()
+        if not raw:
+            return None
+        candidates = {raw.lower(), raw.lower()[0::2]}
+        for candidate in candidates:
+            for idx, accentato in enumerate(GIORNI_ACCENTATI):
+                if candidate == accentato:
+                    return GIORNI_ORDINE[idx]
+        return None
+
+    @staticmethod
+    def _classe_gruppo(nome_classe: str) -> Optional[str]:
+        """
+        Infer a classe's year-group (matching the annual calendar's PDF
+        columns, see CALENDARIO_PDF_GRUPPI_COLONNE) from its name, which in
+        this school's timetable is "<numero romano> <corso>" (e.g. "II
+        ELETTRICISTI"). The one exception is "I.T.C." (this school's special
+        first-year-only "4+2" track, with no II/III/IV counterpart), mapped
+        to the calendar's PRIMA4+2 column rather than PRIME.
+        """
+        parts = nome_classe.strip().split(" ", 1)
+        if len(parts) != 2:
+            return None
+        romano, resto = parts
+        if "I.T.C." in resto.upper():
+            return "PRIMA4+2"
+        return ROMANO_A_GRUPPO.get(romano.upper())
+
+    @staticmethod
+    def parse_orario_settimanale_pdf(file_bytes: bytes) -> Dict[str, Any]:
+        """
+        Parse a weekly timetable PDF ("Orario scolastico dal X al Y ...":
+        one row per hour slot, one column per classe, cell = docente
+        surname teaching that classe at that hour) into:
+          - classi: [{"nome": str, "gruppo": Optional[str]}, ...]
+          - slots: [{"classe_nome", "giorno" (no-accent lowercase), "ora_inizio", "docente_cognome"}, ...]
+          - week_label: the raw "dal 14 al 18 Settembre"-style text found on
+            the page, if any (no year is printed on this template - the
+            caller must confirm/supply it, e.g. by cross-checking the
+            annual calendar for a matching week).
+
+        From `slots` a caller can derive both docente-classe associations
+        (which classi a docente teaches) and docente availability (the hours
+        a docente is observed present that week).
+        """
+        import pdfplumber
+        import re
+
+        logger.info("Parsing weekly timetable from PDF")
+
+        classi: List[Dict[str, Any]] = []
+        slots: List[Dict[str, Any]] = []
+        week_label: Optional[str] = None
+
+        try:
+            with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+                for page in pdf.pages:
+                    if week_label is None:
+                        text = page.extract_text() or ""
+                        m = re.search(r"dal\s+\d{1,2}\s+al\s+\d{1,2}\s+\w+", text, re.IGNORECASE)
+                        if m:
+                            week_label = m.group(0)
+
+                    for table in page.find_tables():
+                        data = table.extract()
+                        if not data:
+                            continue
+
+                        header = data[0]
+                        classe_columns = [
+                            (idx, cell.strip())
+                            for idx, cell in enumerate(header)
+                            if idx >= 2 and cell and cell.strip()
+                        ]
+                        if not classi:
+                            classi = [
+                                {"nome": nome, "gruppo": SchoolRosterParser._classe_gruppo(nome)}
+                                for _, nome in classe_columns
+                            ]
+
+                        current_giorno: Optional[str] = None
+                        for row in data[1:]:
+                            giorno = SchoolRosterParser._normalize_giorno(row[0] if row else None)
+                            if giorno:
+                                current_giorno = giorno
+
+                            ora_label = (row[1] or "").strip() if len(row) > 1 else ""
+                            ora_match = re.match(r"(\d{1,2})\s*-\s*\d{1,2}", ora_label)
+                            if not current_giorno or not ora_match:
+                                continue
+                            ora_inizio = int(ora_match.group(1))
+
+                            for idx, nome_classe in classe_columns:
+                                docente = (row[idx] or "").strip() if idx < len(row) else ""
+                                if not docente:
+                                    continue
+                                slots.append({
+                                    "classe_nome": nome_classe,
+                                    "giorno": current_giorno,
+                                    "ora_inizio": ora_inizio,
+                                    "docente_cognome": docente.upper(),
+                                })
+
+            logger.info(
+                f"Parsed weekly timetable: {len(classi)} classi, {len(slots)} slot entries"
+                + (f", week_label={week_label!r}" if week_label else "")
+            )
+            return {"classi": classi, "slots": slots, "week_label": week_label}
+
+        except Exception as e:
+            logger.error(f"Error parsing weekly timetable PDF: {e}")
+            raise
