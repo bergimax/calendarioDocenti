@@ -111,9 +111,11 @@ class ScheduleSolver:
         # 3. Add soft constraints
         self._add_soft_constraints()
 
-        # 4. Set objective function
+        # 4. Set objective function (weighted sum: `weight` was previously
+        # computed per soft constraint but silently dropped here, so every
+        # soft violation cost the same regardless of its intended priority)
         if self.soft_penalties:
-            self.model.Minimize(sum(penalty for penalty, _ in self.soft_penalties))
+            self.model.Minimize(sum(penalty * weight for penalty, weight in self.soft_penalties))
 
         logger.info(f"Model built: {len(self.x)} variables, {len(self.model.Proto().constraints)} constraints")
         return self
@@ -148,8 +150,37 @@ class ScheduleSolver:
         # Hard 6: Don't exceed residual hours
         self._constraint_monte_ore_limit()
 
+    def _paired_assignment_ids_to_dedupe(self) -> Set[str]:
+        """
+        When the same docente teaches both sides of a classe-accoppiata for the
+        common materia (the spec-intended case), _constraint_paired_classes
+        forces their two assegnazioni to always be equal (x_a == x_b): they
+        represent a single joint lesson, not two separate bookings. Without
+        this, _constraint_no_double_booking would sum both into the same
+        docente/giorno/ora slot and force the pair to always be 0 (sum <= 1
+        vs. x_a == x_b == 1 is unsatisfiable). Returns the assegnazione_ids
+        of the "B" side of such pairs, to be excluded from that sum.
+        """
+        skip_ids: Set[str] = set()
+        for classe_a, classe_b, materia_id in self.context.classi_accoppiate:
+            asg_a = next(
+                (a for a in self.context.assegnazioni
+                 if a.classe_id == classe_a and a.materia_id == materia_id),
+                None,
+            )
+            asg_b = next(
+                (a for a in self.context.assegnazioni
+                 if a.classe_id == classe_b and a.materia_id == materia_id),
+                None,
+            )
+            if asg_a and asg_b and asg_a.docente_id == asg_b.docente_id:
+                skip_ids.add(asg_b.assegnazione_id)
+        return skip_ids
+
     def _constraint_no_double_booking(self) -> None:
         """Hard constraint 1: No teacher can teach 2 classes in same hour."""
+        skip_ids = self._paired_assignment_ids_to_dedupe()
+
         # Group assegnazioni by docente
         docenti_asgs = {}
         for asg in self.context.assegnazioni:
@@ -164,7 +195,8 @@ class ScheduleSolver:
                     overlapping = [
                         self.x[(asg.assegnazione_id, giorno, ora)]
                         for asg in asgs
-                        if (asg.assegnazione_id, giorno, ora) in self.x
+                        if asg.assegnazione_id not in skip_ids
+                        and (asg.assegnazione_id, giorno, ora) in self.x
                     ]
                     if overlapping:
                         self.model.Add(sum(overlapping) <= 1)
