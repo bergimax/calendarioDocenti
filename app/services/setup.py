@@ -28,6 +28,46 @@ class SetupService:
         # Cache parsed data during setup flow (session-scoped)
         self.parsed_data_cache: Dict[str, Any] = {}
 
+    @staticmethod
+    def _calendario_preview(parsed: List[Dict[str, Any]]) -> Dict[str, Any]:
+        gruppi = sorted({p["gruppo"] for p in parsed if p.get("gruppo")})
+        return {
+            "count": len(parsed),
+            "date_range": (
+                f"{min(p['data'] for p in parsed)} to {max(p['data'] for p in parsed)}"
+                if parsed else "N/A"
+            ),
+            "closures": sum(1 for p in parsed if p.get("flag_chiusura")),
+            "gruppi": gruppi,
+        }
+
+    def ingest_calendar_file(self, filename: str, content: bytes) -> Dict[str, Any]:
+        """
+        Parse a calendar file (CSV or PDF, specs.md 3.1) uploaded ahead of
+        the main /api/setup/validate call, and cache the result so it's
+        picked up automatically by parse_and_validate_files() even though
+        the calendario field is absent from that call's JSON body.
+        """
+        lower_name = filename.lower()
+
+        if lower_name.endswith(".pdf"):
+            parsed = CalendarParser.parse_calendario_pdf(content)
+            file_type = "pdf"
+        elif lower_name.endswith(".csv"):
+            parsed = CalendarParser.parse_calendar_csv(content.decode("utf-8"))
+            file_type = "csv"
+        else:
+            raise ValueError("Calendar file must be .csv or .pdf")
+
+        self.parsed_data_cache["calendario"] = parsed
+
+        logger.info(f"Ingested calendar {file_type} '{filename}': {len(parsed)} entries")
+
+        return {
+            "file_type": file_type,
+            "preview": self._calendario_preview(parsed),
+        }
+
     def parse_and_validate_files(
         self,
         file_data: Dict[str, Optional[str]],
@@ -65,8 +105,21 @@ class SetupService:
             csv_content = file_data.get(file_type)
 
             if not csv_content:
+                # The calendar may have already been parsed (from a CSV or
+                # PDF upload) via ingest_calendar_file() / /api/calendar/upload,
+                # ahead of this JSON-body validate call - reuse it rather
+                # than reporting it as missing.
+                if file_type == "calendario" and self.parsed_data_cache.get("calendario"):
+                    parsed = self.parsed_data_cache["calendario"]
+                    parsed_data[file_type] = parsed
+                    results[file_type] = FileValidationResult(
+                        success=True,
+                        preview=self._calendario_preview(parsed),
+                        warnings=[],
+                        errors=[],
+                    )
                 # Optional file (accoppiamenti)
-                if file_type == "accoppiamenti":
+                elif file_type == "accoppiamenti":
                     results[file_type] = FileValidationResult(
                         success=True,
                         preview={"count": 0},
@@ -92,11 +145,7 @@ class SetupService:
 
                 # Build preview
                 if file_type == "calendario":
-                    preview = {
-                        "count": len(parsed),
-                        "date_range": f"{min(p['data'] for p in parsed)} to {max(p['data'] for p in parsed)}" if parsed else "N/A",
-                        "closures": sum(1 for p in parsed if p.get("flag_chiusura"))
-                    }
+                    preview = self._calendario_preview(parsed)
                 elif file_type == "docenti":
                     preview = {
                         "count": len(parsed),

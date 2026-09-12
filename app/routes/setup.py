@@ -42,27 +42,41 @@ def _get_setup_service(db: Session) -> SetupService:
 
 
 @router.post("/calendar/upload")
-async def upload_calendar(file: UploadFile = File(...)) -> FileUploadResponse:
+async def upload_calendar(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+) -> FileUploadResponse:
     """
-    Upload calendar CSV file.
-    Returns file_id for later processing.
-    """
-    if not file.filename.endswith(".csv"):
-        raise HTTPException(status_code=400, detail="Only CSV files allowed for calendar")
+    Upload the annual calendar as CSV or PDF (specs.md 3.1).
 
-    # Read file content
+    Parses it immediately and caches the result for the setup wizard, so a
+    subsequent POST /api/setup/validate doesn't need to repeat the
+    "calendario" field in its JSON body.
+    """
+    filename = file.filename or ""
+    if not (filename.lower().endswith(".csv") or filename.lower().endswith(".pdf")):
+        raise HTTPException(status_code=400, detail="Calendar file must be .csv or .pdf")
+
     content = await file.read()
-    csv_content = content.decode("utf-8")
+
+    try:
+        service = _get_setup_service(db)
+        result = service.ingest_calendar_file(filename, content)
+    except ValueError as e:
+        logger.warning(f"Calendar upload validation error: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Calendar upload parse error: {e}")
+        raise HTTPException(status_code=400, detail=f"Could not parse calendar file: {e}")
 
     file_id = f"cal_{__import__('uuid').uuid4()}"
-
-    logger.info(f"Calendar file uploaded: {file_id}")
+    logger.info(f"Calendar file uploaded: {file_id} ({result['file_type']})")
 
     return FileUploadResponse(
         status="uploaded",
         file_id=file_id,
         file_type="calendario",
-        preview={"bytes": len(csv_content)},
+        preview=result["preview"],
     )
 
 

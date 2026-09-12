@@ -110,6 +110,7 @@ class ScheduleRepository:
                     data=cal.data,
                     giorno=giorno,
                     ore_max_giornata=cal.ore_max_giornata,
+                    gruppo=cal.gruppo,
                     flag_stage_classe_id=cal.flag_stage_classe_id,
                     flag_chiusura=cal.flag_chiusura,
                 )
@@ -144,6 +145,13 @@ class ScheduleRepository:
         for asg_data in assegnazioni_dati:
             materie_map[asg_data.materia_id] = asg_data.materia_tipo
 
+        # 7. Build classi -> gruppo map (year-group label, for per-group PDF calendars)
+        classi_gruppo = {}
+        for classe_id in classi_set:
+            classe = self.db.query(Classe).filter_by(id=classe_id).first()
+            if classe:
+                classi_gruppo[classe_id] = classe.gruppo
+
         logger.info(f"Context built: {len(assegnazioni_dati)} asgs, {len(docenti_map)} teachers, {len(classi_set)} classes")
 
         return ScheduleContext(
@@ -158,6 +166,7 @@ class ScheduleRepository:
             docenti_map=docenti_map,
             classi_set=classi_set,
             materie_map=materie_map,
+            classi_gruppo=classi_gruppo,
         )
 
     def save_generated_schedule(

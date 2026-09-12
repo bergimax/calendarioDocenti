@@ -42,10 +42,18 @@ class DisponibilitaDati:
 
 @dataclass
 class CalendarioDati:
-    """Calendar day data for week."""
+    """
+    Calendar day data for week.
+    gruppo=None means this row applies school-wide (every classe); a
+    non-None gruppo restricts it to classi whose gruppo matches (used for a
+    calendar extracted from a per-year-group PDF, where daily hours differ
+    by year group). Multiple rows can share the same (data, giorno) as long
+    as their gruppo differs.
+    """
     data: date
     giorno: int  # 0-4
     ore_max_giornata: int
+    gruppo: Optional[str] = None
     flag_stage_classe_id: Optional[str] = None
     flag_chiusura: bool = False
 
@@ -71,6 +79,11 @@ class ScheduleContext:
     docenti_map: Dict[str, str]  # docente_id -> docente_tipo
     classi_set: Set[str]  # all classe_ids
     materie_map: Dict[str, str]  # materia_id -> materia_tipo
+    classi_gruppo: Dict[str, Optional[str]] = None  # classe_id -> gruppo (year-group label)
+
+    def __post_init__(self):
+        if self.classi_gruppo is None:
+            self.classi_gruppo = {}
 
 
 class ScheduleSolver:
@@ -201,6 +214,27 @@ class ScheduleSolver:
                     if overlapping:
                         self.model.Add(sum(overlapping) <= 1)
 
+    def _ore_max_for_classe_giorno(self, classe_id: str, giorno: int) -> int:
+        """
+        Resolve the daily hour cap for a classe on a given giorno.
+        Looks for a calendar row scoped to this classe's gruppo first (a
+        per-year-group PDF calendar), then falls back to a school-wide row
+        (gruppo=None, e.g. a plain CSV calendar or an inferred closure), then
+        to a hardcoded default if neither exists.
+        """
+        gruppo = self.context.classi_gruppo.get(classe_id)
+
+        if gruppo is not None:
+            for c in self.context.calendario:
+                if c.giorno == giorno and c.gruppo == gruppo:
+                    return 0 if c.flag_chiusura else c.ore_max_giornata
+
+        for c in self.context.calendario:
+            if c.giorno == giorno and c.gruppo is None:
+                return 0 if c.flag_chiusura else c.ore_max_giornata
+
+        return 6  # no calendar data at all for this day: default
+
     def _constraint_day_capacity(self) -> None:
         """Hard constraint 2: Per-class daily hours <= ore_max_giornata."""
         # Group assegnazioni by classe
@@ -213,16 +247,7 @@ class ScheduleSolver:
         # For each classe/giorno
         for classe_id, asgs in classi_asgs.items():
             for giorno in range(5):
-                # Find max hours for this day
-                cal_entry = next(
-                    (c for c in self.context.calendario if c.giorno == giorno),
-                    None
-                )
-                if not cal_entry:
-                    continue
-
-                # Closure days (holidays/extraordinary closures) have zero capacity
-                ore_max = 0 if cal_entry.flag_chiusura else cal_entry.ore_max_giornata
+                ore_max = self._ore_max_for_classe_giorno(classe_id, giorno)
 
                 # Sum all hours for this classe/giorno
                 hours_in_day = [

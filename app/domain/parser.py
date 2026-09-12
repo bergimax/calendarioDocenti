@@ -5,11 +5,29 @@ Decoupled from routes/DB for testability.
 
 import csv
 import io
-from datetime import datetime, date
+from collections import defaultdict
+from datetime import datetime, date, timedelta
 from typing import List, Dict, Any, Tuple, Optional
 import logging
 
 logger = logging.getLogger(__name__)
+
+MESI_ITALIANI = {
+    "gennaio": 1, "febbraio": 2, "marzo": 3, "aprile": 4, "maggio": 5, "giugno": 6,
+    "luglio": 7, "agosto": 8, "settembre": 9, "ottobre": 10, "novembre": 11, "dicembre": 12,
+}
+
+# x0-coordinate ranges (in PDF points) for the 5 year-group columns in the
+# "CALENDARIO AF" table layout used by this school (see specs.md 3.1). If the
+# school changes this template, these ranges - and the < 140 cutoff used to
+# isolate the date column in parse_calendario_pdf - may need updating.
+CALENDARIO_PDF_GRUPPI_COLONNE = [
+    ("PRIME", (140, 195)),
+    ("SECONDE", (195, 250)),
+    ("TERZE", (250, 305)),
+    ("QUARTE", (305, 360)),
+    ("PRIMA4+2", (360, 410)),
+]
 
 
 class CalendarParser:
@@ -20,7 +38,8 @@ class CalendarParser:
         """
         Parse calendar from CSV format.
         Expected columns: data (YYYY-MM-DD), ore_max_giornata (4/5/6), flag_chiusura (true/false)
-        Optional: stage_classe_id (class in stage on this date)
+        Optional: stage_classe_id (class in stage on this date), gruppo (year-group this row
+        applies to, e.g. "PRIME" - leave empty for a school-wide row that applies to every classe)
         """
         logger.info("Parsing calendar from CSV")
 
@@ -53,8 +72,12 @@ class CalendarParser:
                     # Parse stage_classe_id (optional)
                     stage_classe_id = row.get("stage_classe_id", "").strip() or None
 
+                    # Parse gruppo (optional)
+                    gruppo = (row.get("gruppo") or "").strip() or None
+
                     calendar_entries.append({
                         "data": data,
+                        "gruppo": gruppo,
                         "ore_max_giornata": ore_max,
                         "flag_chiusura": flag_chiusura,
                         "stage_classe_id": stage_classe_id,
@@ -69,6 +92,131 @@ class CalendarParser:
 
         except Exception as e:
             logger.error(f"Error parsing calendar CSV: {e}")
+            raise
+
+    @staticmethod
+    def _parse_italian_date_words(words: List[str]) -> Optional[date]:
+        """Parse a date from loose word tokens like ["mercoledì","9","settembre","2026"]."""
+        month = day = year = None
+        for w in words:
+            lw = w.lower()
+            if lw in MESI_ITALIANI:
+                month = MESI_ITALIANI[lw]
+            elif w.isdigit() and len(w) == 4:
+                year = int(w)
+            elif w.isdigit():
+                day = int(w)
+        if month and day and year:
+            try:
+                return date(year, month, day)
+            except ValueError:
+                return None
+        return None
+
+    @staticmethod
+    def parse_calendario_pdf(file_bytes: bytes) -> List[Dict[str, Any]]:
+        """
+        Parse the annual calendar from a PDF (specs.md 3.1: "Parser Intelligente
+        del Calendario Annuale (PDF OCR / AI)").
+
+        This targets the "CALENDARIO AF" table layout actually used by this
+        school: one row per school day (weekday name, day, Italian month
+        name, year) followed by daily-hours columns for 5 year-groups
+        (PRIME/SECONDE/TERZE/QUARTE/PRIMA4+2), with an events table alongside
+        that is ignored here.
+
+        Extraction is done by clustering words by their (x, y) position
+        rather than relying on pdfplumber's automatic table-grid detection,
+        which merges multiple calendar rows together on this file (rows are
+        tightly packed and the border grid isn't fully rectilinear). Position
+        clustering also survives pages where a naive linear text read jumbles
+        adjacent columns' digits together.
+
+        Produces one entry per (data, gruppo) with that year-group's daily
+        hours (0 if the cell is blank - e.g. that group is on tirocinio that
+        day), plus a school-wide (gruppo=None) flag_chiusura=True entry for
+        every weekday within the school-year range that has no data at all
+        for any group (inferred closure).
+
+        If this school's calendar template changes, CALENDARIO_PDF_GRUPPI_COLONNE
+        and the date-column cutoff below may need to be adjusted to match.
+        """
+        import pdfplumber
+
+        logger.info("Parsing calendar from PDF")
+
+        entries: List[Dict[str, Any]] = []
+        all_dates_seen = set()
+
+        try:
+            with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+                date_column_max_x = CALENDARIO_PDF_GRUPPI_COLONNE[0][1][0]
+                page_crop_width = max(x for _, (_, x) in CALENDARIO_PDF_GRUPPI_COLONNE)
+
+                for page in pdf.pages:
+                    left = page.crop((0, 0, min(page_crop_width, page.width), page.height))
+                    words = left.extract_words(use_text_flow=False, keep_blank_chars=False)
+
+                    rows: Dict[float, List[dict]] = defaultdict(list)
+                    for w in words:
+                        rows[round(w["top"], 1)].append(w)
+
+                    for _, ws in rows.items():
+                        ws_sorted = sorted(ws, key=lambda w: w["x0"])
+                        date_words = [w["text"] for w in ws_sorted if w["x0"] < date_column_max_x]
+                        parsed_date = CalendarParser._parse_italian_date_words(date_words)
+                        if not parsed_date:
+                            continue  # header / blank separator / events-table row
+
+                        all_dates_seen.add(parsed_date)
+                        for gruppo, (x_min, x_max) in CALENDARIO_PDF_GRUPPI_COLONNE:
+                            val_words = [w["text"] for w in ws_sorted if x_min <= w["x0"] < x_max]
+                            ore = 0
+                            if val_words:
+                                try:
+                                    ore = int(val_words[0])
+                                except ValueError:
+                                    logger.warning(
+                                        f"Unparseable hours value {val_words[0]!r} for "
+                                        f"{gruppo} on {parsed_date}"
+                                    )
+                                    continue
+                            entries.append({
+                                "data": parsed_date,
+                                "gruppo": gruppo,
+                                "ore_max_giornata": ore,
+                                "flag_chiusura": False,
+                                "stage_classe_id": None,
+                            })
+
+            if all_dates_seen:
+                start, end = min(all_dates_seen), max(all_dates_seen)
+                d = start
+                while d <= end:
+                    if d.weekday() < 5 and d not in all_dates_seen:
+                        entries.append({
+                            "data": d,
+                            "gruppo": None,
+                            "ore_max_giornata": 0,
+                            "flag_chiusura": True,
+                            "stage_classe_id": None,
+                        })
+                    d += timedelta(days=1)
+
+            if not all_dates_seen:
+                raise ValueError(
+                    "No calendar rows recognized in this PDF. The parser expects the "
+                    "'CALENDARIO AF' table layout; a different template needs its own parser."
+                )
+
+            logger.info(
+                f"Parsed {len(entries)} calendar entries from PDF "
+                f"({len(all_dates_seen)} school days, range {min(all_dates_seen)}..{max(all_dates_seen)})"
+            )
+            return entries
+
+        except Exception as e:
+            logger.error(f"Error parsing calendar PDF: {e}")
             raise
 
     @staticmethod
@@ -117,6 +265,9 @@ class CalendarParser:
         """
         Parse classes from CSV.
         Expected columns: nome, n_studenti (optional)
+        Optional: gruppo (year-group label matching a PDF calendar's columns,
+        e.g. "PRIME" - required only if the calendar was extracted from a
+        per-year-group PDF and daily hours should apply to this classe)
         """
         logger.info("Parsing classes from CSV")
 
@@ -136,9 +287,12 @@ class CalendarParser:
                     except ValueError:
                         raise ValueError(f"n_studenti must be integer, got {n_studenti_str}")
 
+                    gruppo = (row.get("gruppo") or "").strip() or None
+
                     classi.append({
                         "nome": nome,
                         "n_studenti": n_studenti,
+                        "gruppo": gruppo,
                     })
 
                 except ValueError as e:
