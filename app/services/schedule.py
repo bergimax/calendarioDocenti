@@ -492,32 +492,117 @@ class ScheduleService:
 
     def export_pdf(self, scuola_id: str, week_start: date) -> Dict[str, Any]:
         """
-        Export schedule to PDF tabellone.
-        TODO: Implement WeasyPrint rendering for actual PDF generation.
+        Return metadata + a download URL for the week's PDF tabellone. The
+        PDF itself is rendered on demand by the download route (see
+        render_pdf) rather than written to disk here, so it's always built
+        from the current schedule state (no stale-file cache to invalidate).
         """
         logger.info(f"Exporting schedule to PDF: school {scuola_id} week {week_start}")
 
-        try:
-            schedule = self.repo.get_schedule_by_week(scuola_id, week_start)
+        schedule = self.repo.get_schedule_by_week(scuola_id, week_start)
+        if not schedule:
+            return {"status": "error", "message": "No schedule found for this week"}
 
-            if not schedule:
-                return {
-                    "status": "error",
-                    "message": "No schedule found for this week",
-                }
+        return {
+            "status": "generated",
+            "filename": f"orario_{week_start}.pdf",
+            "pdf_url": f"/api/schedule/{week_start}/export-pdf/file",
+        }
 
-            # TODO: Generate PDF using WeasyPrint
-            # For now, return placeholder
+    def render_pdf(self, scuola_id: str, week_start: date) -> Optional[bytes]:
+        """
+        Render the weekly tabellone (classi x ore, one landscape page per
+        giorno, per specs.md 6.3) as a PDF via WeasyPrint. Returns None if
+        no schedule exists for this week.
+        """
+        schedule = self.repo.get_schedule_by_week(scuola_id, week_start)
+        if not schedule:
+            return None
 
-            return {
-                "status": "generated",
-                "filename": f"orario_{week_start}.pdf",
-                "message": "PDF export not yet implemented (WeasyPrint integration pending)",
-            }
+        from weasyprint import HTML
 
-        except Exception as e:
-            logger.error(f"Error exporting PDF: {e}")
-            return {
-                "status": "error",
-                "message": str(e),
-            }
+        html = self._render_tabellone_html(schedule)
+        return HTML(string=html).write_pdf()
+
+    _GIORNI_LABELS = {
+        "LUNEDI": "Lunedì", "MARTEDI": "Martedì", "MERCOLEDI": "Mercoledì",
+        "GIOVEDI": "Giovedì", "VENERDI": "Venerdì",
+    }
+    _ORE = range(8, 14)
+
+    def _render_tabellone_html(self, schedule: Dict[str, Any]) -> str:
+        from html import escape
+
+        slots = schedule["slots"]
+
+        classi = {}
+        for s in slots:
+            classi.setdefault(s["classe_id"], s.get("classe_nome") or s["classe_id"])
+        classi_sorted = sorted(classi.items(), key=lambda c: c[1])
+
+        by_cell = {(s["giorno"], s["ora_inizio"], s["classe_id"]): s for s in slots}
+
+        pages = []
+        for giorno in self._GIORNI_LABELS:
+            rows_html = []
+            for ora in self._ORE:
+                skip: set = set()
+                cells = [f'<td class="ora">{ora}:00</td>']
+                for classe_id, classe_nome in classi_sorted:
+                    if classe_id in skip:
+                        continue
+                    slot = by_cell.get((giorno, ora, classe_id))
+                    if not slot:
+                        cells.append('<td class="libera">Libera</td>')
+                        continue
+
+                    colspan = 1
+                    if slot.get("accoppiata") and slot.get("classe_accoppiata_id"):
+                        skip.add(slot["classe_accoppiata_id"])
+                        colspan = 2
+
+                    tone = "pratica" if slot.get("materia_tipo") == "PRATICA" else "teoria"
+                    materia = escape(slot.get("materia_nome") or slot["materia_id"])
+                    docente = escape(slot.get("docente_nome") or slot["docente_id"])
+                    cells.append(
+                        f'<td class="{tone}" colspan="{colspan}">'
+                        f'<strong>{materia}</strong><span class="docente">{docente}</span>'
+                        f'</td>'
+                    )
+                rows_html.append(f"<tr>{''.join(cells)}</tr>")
+
+            header_cells = "".join(f"<th>{escape(nome)}</th>" for _, nome in classi_sorted)
+            pages.append(f"""
+                <div class="day-page">
+                  <h1>Orario settimanale</h1>
+                  <h2>{self._GIORNI_LABELS[giorno]} &middot; settimana dal {escape(str(schedule["week_start"]))}</h2>
+                  <table>
+                    <thead><tr><th>Ora</th>{header_cells}</tr></thead>
+                    <tbody>{''.join(rows_html)}</tbody>
+                  </table>
+                </div>
+            """)
+
+        return f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  @page {{ size: A4 landscape; margin: 12mm; }}
+  body {{ font-family: Helvetica, Arial, sans-serif; font-size: 9pt; color: #111; margin: 0; }}
+  h1 {{ font-size: 14pt; margin: 0 0 2mm 0; }}
+  h2 {{ font-size: 11pt; margin: 0 0 4mm 0; color: #444; font-weight: normal; }}
+  table {{ width: 100%; border-collapse: collapse; }}
+  th, td {{ border: 0.5pt solid #999; padding: 2mm; text-align: left; vertical-align: top; }}
+  th {{ background: #eee; font-size: 8pt; text-transform: uppercase; }}
+  td.ora {{ font-weight: bold; white-space: nowrap; width: 14mm; }}
+  td.teoria {{ background: #eaf2ff; }}
+  td.pratica {{ background: #eafbea; }}
+  td.libera {{ color: #999; font-style: italic; }}
+  .docente {{ display: block; font-size: 7.5pt; color: #555; margin-top: 0.5mm; }}
+  .day-page {{ page-break-after: always; }}
+  .day-page:last-child {{ page-break-after: auto; }}
+</style>
+</head>
+<body>{''.join(pages)}</body>
+</html>"""

@@ -114,7 +114,7 @@ function SchedulePage() {
   async function exportPdf() {
     try {
       const res = await api<{ pdf_url: string }>(`/api/schedule/${week}/export-pdf`);
-      window.open(res.pdf_url, "_blank", "noopener");
+      window.open(`${API_BASE_URL}${res.pdf_url}`, "_blank", "noopener");
     } catch (err) {
       setNotice(apiErrorMessage(err));
     }

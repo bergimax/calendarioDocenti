@@ -268,6 +268,7 @@ class ScheduleRepository:
                 "docente_nome": slot.docente.nome if slot.docente else None,
                 "materia_id": slot.materia_id,
                 "materia_nome": slot.materia.nome if slot.materia else None,
+                "materia_tipo": slot.materia.tipo if slot.materia else None,
                 "giorno": slot.giorno,
                 "ora_inizio": slot.ora_inizio,
                 "ora_fine": slot.ora_fine,

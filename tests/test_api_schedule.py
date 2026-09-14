@@ -156,7 +156,30 @@ def test_export_pdf_endpoint(client, school_setup):
 
     r = client.get(f"/api/schedule/{week}/export-pdf")
     assert r.status_code == 200
-    assert r.json()["status"] == "generated"
+    body = r.json()
+    assert body["status"] == "generated"
+    assert body["pdf_url"] == f"/api/schedule/{week}/export-pdf/file"
+
+
+def test_export_pdf_without_schedule(client, school_setup):
+    r = client.get("/api/schedule/2099-01-05/export-pdf")
+    assert r.status_code == 200
+    assert r.json()["status"] == "error"
+
+
+def test_export_pdf_file_is_a_real_pdf(client, school_setup):
+    week = school_setup["week_start"]
+    client.post("/api/schedule/generate", json={"week_start": week})
+
+    r = client.get(f"/api/schedule/{week}/export-pdf/file")
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "application/pdf"
+    assert r.content.startswith(b"%PDF")
+
+
+def test_export_pdf_file_without_schedule_is_404(client, school_setup):
+    r = client.get("/api/schedule/2099-01-05/export-pdf/file")
+    assert r.status_code == 404
 
 
 def test_modify_slot_endpoint_smoke(client, school_setup):

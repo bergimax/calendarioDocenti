@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy.orm import Session
 from datetime import date
 from typing import Dict, Any
@@ -215,3 +215,33 @@ def export_pdf(
     except Exception as e:
         logger.error(f"Error exporting PDF: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/schedule/{week_start}/export-pdf/file")
+def download_pdf(
+    week_start: date,
+    db: Session = Depends(get_db),
+) -> Response:
+    """
+    Stream the actual PDF tabellone bytes (the URL returned by export-pdf).
+    """
+    scuola_id = _get_current_school_id()
+
+    try:
+        service = ScheduleService(db)
+        pdf_bytes = service.render_pdf(scuola_id=scuola_id, week_start=week_start)
+
+        if pdf_bytes is None:
+            raise HTTPException(status_code=404, detail="No schedule found for this week")
+
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'inline; filename="orario_{week_start}.pdf"'},
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error rendering PDF: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
