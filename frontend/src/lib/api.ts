@@ -62,5 +62,11 @@ export function apiErrorMessage(error: unknown): string {
       ? "Server non raggiungibile. Il backend non è ancora attivo."
       : error.message;
   }
+  // Some endpoints return HTTP 200 with a {"status": "error", "message": ...}
+  // body (a business-rule rejection, not a transport failure) - callers that
+  // detect that shape throw a plain Error with the backend's own message.
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
   return "Si è verificato un errore imprevisto.";
 }

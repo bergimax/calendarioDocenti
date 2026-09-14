@@ -5,7 +5,7 @@ import { AppShell } from "@/components/AppShell";
 import { Badge, Button, Select } from "@/components/ui-kit";
 import { ErrorState, LoadingState } from "@/components/States";
 import { API_BASE_URL, api, apiErrorMessage } from "@/lib/api";
-import type { ChatMessage, Conflict, Schedule, SlotLezione, Week } from "@/lib/types";
+import type { ChatMessage, Conflict, Schedule, SlotLezione, Teacher, Week } from "@/lib/types";
 
 export const Route = createFileRoute("/orario")({
   head: () => ({
@@ -38,12 +38,33 @@ const GIORNI = [
   { value: "VENERDI", label: "Venerdì" },
 ];
 
+// modify-slot's ora_inizio is a number (8..13), matching backend's
+// SlotLezioneResponse.ora_inizio: int - the option value must be that
+// number too (a string like "08:00" would fail the backend's int(...)).
+const ORE_OPTIONS = [8, 9, 10, 11, 12, 13].map((h) => ({ value: h, label: `${String(h).padStart(2, "0")}:00` }));
+
 const QUICK_ACTIONS = [
   { action_type: "force_3_hours_theory", label: "Forza 3 ore teoria" },
   { action_type: "reduce_contract_hours", label: "Riduci ore docente a contratto" },
   { action_type: "authorize_early_exit", label: "Autorizza uscita anticipata" },
   { action_type: "override_availability", label: "Deroga disponibilità" },
 ];
+
+// generate/regenerate, modify-slot and apply-quick-action all reply with
+// HTTP 200 even when the requested change is rejected (a locked schedule, a
+// broken pairing constraint, an unassigned teacher, ...) - the body is then
+// {"status": "error", "message": "..."} instead of a real Schedule. Every
+// caller must check for that shape before treating the response as a
+// Schedule to display, or a rejection crashes the whole page (active.slots
+// is not iterable) instead of showing the backend's own error message.
+type ScheduleMutationResult = Schedule & { status?: string; message?: string };
+
+function requireSchedule(res: ScheduleMutationResult): Schedule {
+  if (res.status === "error") {
+    throw new Error(res.message ?? "Operazione non riuscita");
+  }
+  return res;
+}
 
 function SchedulePage() {
   const [week, setWeek] = useState("");
@@ -87,8 +108,8 @@ function SchedulePage() {
         endpoint === "generate" ? { week_start: week, include_preferences: true } : {};
       const path =
         endpoint === "generate" ? "/api/schedule/generate" : `/api/schedule/${week}/regenerate`;
-      const res = await api<Schedule>(path, { method: "POST", body });
-      setSchedule(res);
+      const res = await api<ScheduleMutationResult>(path, { method: "POST", body });
+      setSchedule(requireSchedule(res));
     } catch (err) {
       setGenError(err);
     } finally {
@@ -98,12 +119,13 @@ function SchedulePage() {
 
   async function applyQuickAction(actionType: string) {
     try {
-      const res = await api<Schedule>(`/api/schedule/${week}/apply-quick-action`, {
+      const res = await api<ScheduleMutationResult>(`/api/schedule/${week}/apply-quick-action`, {
         method: "POST",
         body: { action_type: actionType, parameters: {} },
       });
-      setSchedule(res);
-      setNotice(`Deroga applicata · nuovo punteggio ${Math.round(res.quality_score)}`);
+      const updated = requireSchedule(res);
+      setSchedule(updated);
+      setNotice(`Deroga applicata · nuovo punteggio ${Math.round(updated.quality_score)}`);
     } catch (err) {
       setNotice(apiErrorMessage(err));
     }
@@ -111,11 +133,14 @@ function SchedulePage() {
 
   async function approve() {
     try {
-      await api(`/api/schedule/${week}/approve`, {
+      const res = await api<{ status: string; message?: string }>(`/api/schedule/${week}/approve`, {
         method: "POST",
         body: { schedule_id: active?.schedule_id },
       });
+      if (res.status === "error") throw new Error(res.message ?? "Approvazione non riuscita");
       setNotice("Orario approvato.");
+      setSchedule(null);
+      void existing.refetch();
     } catch (err) {
       setNotice(apiErrorMessage(err));
     }
@@ -512,18 +537,24 @@ function ModifySlotPanel({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
 
+  const teachers = useQuery({
+    queryKey: ["teachers"],
+    queryFn: () => api<Teacher[]>("/api/teachers"),
+    retry: false,
+  });
+
   async function submit() {
     setBusy(true);
     setError(null);
     try {
-      const res = await api<Schedule>(`/api/schedule/${week}/modify-slot`, {
+      const res = await api<ScheduleMutationResult>(`/api/schedule/${week}/modify-slot`, {
         method: "POST",
         body: {
           slot_id: slot.slot_id,
           changes: { docente_id: docente, giorno, ora_inizio: ora },
         },
       });
-      onUpdated(res);
+      onUpdated(requireSchedule(res));
     } catch (err) {
       setError(err);
     } finally {
@@ -547,14 +578,20 @@ function ModifySlotPanel({
         ))}
       </Select>
       <Select label="Ora" value={ora} onChange={(e) => setOra(e.target.value)}>
-        {ORE.map((o) => (
-          <option key={o} value={o}>
-            {o}
+        {ORE_OPTIONS.map(({ value, label }) => (
+          <option key={value} value={value}>
+            {label}
           </option>
         ))}
       </Select>
-      <Select label="Docente (ID)" value={docente} onChange={(e) => setDocente(e.target.value)}>
-        <option value={slot.docente_id}>{slot.docente_nome ?? slot.docente_id}</option>
+      <Select label="Docente" value={docente} onChange={(e) => setDocente(e.target.value)}>
+        {(teachers.data ?? [{ teacher_id: slot.docente_id, nome: slot.docente_nome ?? slot.docente_id }]).map(
+          (t) => (
+            <option key={t.teacher_id} value={t.teacher_id}>
+              {t.nome}
+            </option>
+          ),
+        )}
       </Select>
       {error ? <p className="text-[11px] text-conflict">{apiErrorMessage(error)}</p> : null}
       <Button variant="primary" className="w-full" onClick={submit} disabled={busy}>
