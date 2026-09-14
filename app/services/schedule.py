@@ -8,6 +8,13 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+QUICK_ACTIONS = {
+    "force_3_hours_theory",
+    "reduce_contract_hours",
+    "authorize_early_exit",
+    "override_availability",
+}
+
 
 class ScheduleService:
     """Business logic for schedule generation and management."""
@@ -266,6 +273,219 @@ class ScheduleService:
                 "status": "error",
                 "message": str(e),
             }
+
+    def get_quality_score(self, scuola_id: str, week_start: date) -> Optional[Dict[str, Any]]:
+        """
+        Return the quality score stored for this week's schedule (computed
+        at generation/modification time from the solver's soft constraints).
+        Returns None if no schedule exists for this week.
+        """
+        schedule = self.repo.get_schedule_by_week(scuola_id, week_start)
+        if not schedule:
+            return None
+
+        return {
+            "quality_score": schedule["quality_score"],
+            "quality_level": schedule["quality_level"],
+            "details": {
+                "n_soft_conflicts": schedule["n_soft_conflicts"],
+                "total_slots": len(schedule["slots"]),
+                "stato": schedule["stato"],
+            },
+        }
+
+    def modify_slot(
+        self, scuola_id: str, week_start: date, slot_id: str, changes: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Move a single slot to a different docente/giorno/ora_inizio, then
+        recheck every hard constraint and recompute the quality score by
+        re-solving the same CP-SAT model with every variable pinned to the
+        resulting full-week assignment (see ScheduleSolver.solve_fixed).
+        """
+        from app.models import OrarioSettimanale, SlotLezione, AuditLog
+        from app.domain.solver import ScheduleSolver, GiornoEnum
+
+        orario = self.db.query(OrarioSettimanale).filter(
+            OrarioSettimanale.scuola_id == scuola_id,
+            OrarioSettimanale.settimana_inizio == week_start,
+        ).first()
+        if not orario:
+            return {"status": "error", "message": "No schedule found for this week"}
+        if orario.stato == "APPROVATO":
+            return {"status": "error", "message": "Schedule is approved and locked from modifications"}
+
+        slot = self.db.query(SlotLezione).filter(
+            SlotLezione.id == slot_id,
+            SlotLezione.orario_settimanale_id == orario.id,
+        ).first()
+        if not slot:
+            return {"status": "error", "message": "Slot not found in this schedule"}
+
+        new_docente_id = changes.get("docente_id", slot.docente_id)
+        new_giorno = changes.get("giorno", slot.giorno)
+        try:
+            new_ora_inizio = int(changes.get("ora_inizio", slot.ora_inizio))
+        except (TypeError, ValueError):
+            return {"status": "error", "message": f"Invalid ora_inizio: {changes.get('ora_inizio')!r}"}
+
+        if new_giorno not in GiornoEnum.__members__:
+            return {"status": "error", "message": f"Invalid giorno: {new_giorno!r}"}
+        if not (8 <= new_ora_inizio <= 13):
+            return {"status": "error", "message": f"Invalid ora_inizio: {new_ora_inizio} (must be 8-13)"}
+
+        context = self.repo.get_week_context(scuola_id, week_start)
+
+        # Decision variables are keyed by assegnazione_id, so moving the
+        # slot to a different docente is only possible if that docente is
+        # already linked to this classe/materia via an Assegnazione.
+        target_asg = next(
+            (a for a in context.assegnazioni
+             if a.classe_id == slot.classe_id and a.materia_id == slot.materia_id
+             and a.docente_id == new_docente_id),
+            None,
+        )
+        if not target_asg:
+            return {
+                "status": "error",
+                "message": "This teacher has no assignment for this class/subject; cannot move the slot there.",
+            }
+
+        # Rebuild the proposed full-week assignment: every other currently
+        # committed slot, unchanged, plus this one at its new docente/giorno/ora.
+        assigned_keys = set()
+        for s in orario.slot_lezioni:
+            if s.id == slot.id:
+                continue
+            asg = next(
+                (a for a in context.assegnazioni
+                 if a.classe_id == s.classe_id and a.materia_id == s.materia_id
+                 and a.docente_id == s.docente_id),
+                None,
+            )
+            if asg:
+                assigned_keys.add((asg.assegnazione_id, GiornoEnum[s.giorno].value, s.ora_inizio - 8))
+        assigned_keys.add((target_asg.assegnazione_id, GiornoEnum[new_giorno].value, new_ora_inizio - 8))
+
+        solver = ScheduleSolver(context)
+        solver.build_model()
+        status = solver.solve_fixed(assigned_keys)
+
+        if status not in ("OPTIMAL", "FEASIBLE"):
+            return {
+                "status": "error",
+                "message": "This modification breaks a scheduling rule (double booking, "
+                           "paired class, availability, or daily hour limit).",
+            }
+
+        quality_score, quality_level, n_conflicts = solver.calculate_quality_score()
+
+        slot.docente_id = new_docente_id
+        slot.giorno = new_giorno
+        slot.ora_inizio = new_ora_inizio
+        slot.ora_fine = new_ora_inizio + 1
+
+        orario.quality_score = quality_score
+        orario.quality_level = quality_level
+        orario.n_conflitti_soft = n_conflicts
+
+        audit = AuditLog(
+            scuola_id=scuola_id,
+            orario_settimanale_id=orario.id,
+            azione="MODIFY_SLOT",
+            dettagli={"slot_id": slot_id, "changes": changes},
+        )
+        self.db.add(audit)
+        self.db.commit()
+
+        updated = self.repo.get_schedule_by_week(scuola_id, week_start)
+        return {"status": "modified", **updated}
+
+    def apply_quick_action(
+        self,
+        scuola_id: str,
+        week_start: date,
+        action_type: str,
+        class_id: Optional[str] = None,
+        teacher_id: Optional[str] = None,
+        timeout_seconds: int = 60,
+    ) -> Dict[str, Any]:
+        """
+        Apply a "deroga" (temporary exemption from one soft/hard rule) for
+        this week and re-solve, replacing the current schedule's slots in
+        place (same schedule_id) with the result.
+        """
+        from app.models import OrarioSettimanale, SlotLezione, AuditLog
+        from app.domain.solver import ScheduleSolver, DerogaConfig
+
+        if action_type not in QUICK_ACTIONS:
+            return {"status": "error", "message": f"Unknown quick action: {action_type!r}"}
+
+        orario = self.db.query(OrarioSettimanale).filter(
+            OrarioSettimanale.scuola_id == scuola_id,
+            OrarioSettimanale.settimana_inizio == week_start,
+        ).first()
+        if not orario:
+            return {"status": "error", "message": "No schedule found for this week"}
+        if orario.stato == "APPROVATO":
+            return {"status": "error", "message": "Schedule is approved and locked from modifications"}
+
+        context = self.repo.get_week_context(scuola_id, week_start)
+        if not context.assegnazioni:
+            return {"status": "error", "message": "No teacher-class-subject assignments found."}
+
+        deroga = DerogaConfig(action_type=action_type, classe_id=class_id, docente_id=teacher_id)
+        solver = ScheduleSolver(context, deroga=deroga)
+        solver.build_model()
+        status = solver.solve(timeout_seconds=timeout_seconds)
+
+        if status not in ("OPTIMAL", "FEASIBLE"):
+            return {
+                "status": "error",
+                "message": "No feasible schedule found even with this exemption applied.",
+            }
+
+        slots = solver.extract_solution()
+        quality_score, quality_level, n_conflicts = solver.calculate_quality_score()
+
+        try:
+            self.db.query(SlotLezione).filter(
+                SlotLezione.orario_settimanale_id == orario.id
+            ).delete(synchronize_session=False)
+
+            for slot in slots:
+                self.db.add(SlotLezione(
+                    orario_settimanale_id=orario.id,
+                    classe_id=slot["classe_id"],
+                    docente_id=slot["docente_id"],
+                    materia_id=slot["materia_id"],
+                    giorno=slot["giorno"],
+                    ora_inizio=slot["ora_inizio"],
+                    ora_fine=slot["ora_fine"],
+                    accoppiata=slot.get("accoppiata", False),
+                    classe_accoppiata_id=slot.get("classe_accoppiata_id"),
+                ))
+
+            orario.quality_score = quality_score
+            orario.quality_level = quality_level
+            orario.n_conflitti_soft = n_conflicts
+
+            audit = AuditLog(
+                scuola_id=scuola_id,
+                orario_settimanale_id=orario.id,
+                azione="QUICK_ACTION",
+                dettagli={"action_type": action_type, "class_id": class_id, "teacher_id": teacher_id},
+            )
+            self.db.add(audit)
+            self.db.commit()
+
+        except Exception as e:
+            self.db.rollback()
+            logger.error(f"Error applying quick action: {e}")
+            return {"status": "error", "message": str(e)}
+
+        updated = self.repo.get_schedule_by_week(scuola_id, week_start)
+        return {"status": "applied", **updated}
 
     def export_pdf(self, scuola_id: str, week_start: date) -> Dict[str, Any]:
         """

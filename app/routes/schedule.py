@@ -71,13 +71,22 @@ def get_quality_score(
     """
     Get quality score details for schedule.
     """
-    # TODO: Implement quality score logic
+    scuola_id = _get_current_school_id()
 
-    return {
-        "quality_score": 73,
-        "quality_level": "B",
-        "details": {},
-    }
+    try:
+        service = ScheduleService(db)
+        result = service.get_quality_score(scuola_id=scuola_id, week_start=week_start)
+
+        if result is None:
+            raise HTTPException(status_code=404, detail="No schedule found for this week")
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting quality score: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/schedule/{week_start}/modify-slot")
@@ -87,18 +96,21 @@ def modify_slot(
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
     """
-    Modify single schedule slot and recalculate with warm start.
+    Modify single schedule slot and recalculate quality score.
     """
-    try:
-        # TODO: Implement modify and recalculate logic
+    scuola_id = _get_current_school_id()
 
-        return {
-            "status": "modified",
-            "new_score": 78,
-            "slots": [],
-        }
+    try:
+        service = ScheduleService(db)
+        return service.modify_slot(
+            scuola_id=scuola_id,
+            week_start=week_start,
+            slot_id=request.slot_id,
+            changes=request.changes,
+        )
 
     except Exception as e:
+        logger.error(f"Error modifying slot: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -111,16 +123,20 @@ def apply_quick_action(
     """
     Apply quick action (deroga) and recalculate.
     """
-    try:
-        # TODO: Implement quick action logic
+    scuola_id = _get_current_school_id()
 
-        return {
-            "status": "applied",
-            "new_score": 68,
-            "slots": [],
-        }
+    try:
+        service = ScheduleService(db)
+        return service.apply_quick_action(
+            scuola_id=scuola_id,
+            week_start=week_start,
+            action_type=request.action_type,
+            class_id=request.class_id,
+            teacher_id=request.teacher_id,
+        )
 
     except Exception as e:
+        logger.error(f"Error applying quick action: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

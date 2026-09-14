@@ -1,6 +1,14 @@
 """End-to-end tests for the /api/schedule routes."""
 
 
+def _generated_slots(client, week):
+    """Generate + fetch the persisted schedule, whose slots carry real DB
+    slot_id values (unlike the generate response, which leaves slot_id="")."""
+    gen = client.post("/api/schedule/generate", json={"week_start": week}).json()
+    assert gen["status"] == "generated", gen
+    return client.get(f"/api/schedule/{week}").json()["schedule"]["slots"]
+
+
 def test_generate_schedule_accepts_json_body(client, school_setup):
     """
     Regression test: POST /api/schedule/generate used to declare week_start
@@ -63,9 +71,20 @@ def test_get_schedule_for_week_without_data(client, school_setup):
 
 
 def test_quality_score_endpoint(client, school_setup):
-    r = client.get(f"/api/schedule/{school_setup['week_start']}/quality-score")
+    week = school_setup["week_start"]
+    client.post("/api/schedule/generate", json={"week_start": week})
+
+    r = client.get(f"/api/schedule/{week}/quality-score")
     assert r.status_code == 200
-    assert "quality_score" in r.json()
+    body = r.json()
+    assert "quality_score" in body
+    assert "quality_level" in body
+    assert "n_soft_conflicts" in body["details"]
+
+
+def test_quality_score_endpoint_without_schedule(client, school_setup):
+    r = client.get("/api/schedule/2099-01-05/quality-score")
+    assert r.status_code == 404
 
 
 def test_approve_schedule(client, school_setup):
@@ -108,6 +127,72 @@ def test_modify_slot_endpoint_smoke(client, school_setup):
         json={"slot_id": "whatever", "changes": {"giorno": "martedi"}},
     )
     assert r.status_code == 200
+    assert r.json()["status"] == "error"
+
+
+def test_modify_slot_identity_change_recalculates_score(client, school_setup):
+    """Re-submitting a slot's own giorno/ora is a no-op move: it must still
+    go through the real solve+recalculate path and come back as 'modified'
+    with the full updated schedule (not the old hardcoded placeholder)."""
+    week = school_setup["week_start"]
+    slot = _generated_slots(client, week)[0]
+
+    r = client.post(
+        f"/api/schedule/{week}/modify-slot",
+        json={
+            "slot_id": slot["slot_id"],
+            "changes": {"giorno": slot["giorno"], "ora_inizio": slot["ora_inizio"]},
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "modified"
+    assert "quality_score" in body
+    assert any(s["slot_id"] == slot["slot_id"] for s in body["slots"])
+
+
+def test_modify_slot_rejects_moving_only_one_side_of_a_pair(client, school_setup):
+    """1A/1B Matematica are accoppiate (paired) in the fixture, taught by the
+    same docente at the same giorno/ora. Moving only one side must fail the
+    hard pairing constraint instead of silently "succeeding" like the old
+    placeholder did."""
+    week = school_setup["week_start"]
+    paired_slot = next(s for s in _generated_slots(client, week) if s["accoppiata"])
+
+    other_giorno = "MARTEDI" if paired_slot["giorno"] != "MARTEDI" else "MERCOLEDI"
+    r = client.post(
+        f"/api/schedule/{week}/modify-slot",
+        json={"slot_id": paired_slot["slot_id"], "changes": {"giorno": other_giorno}},
+    )
+    assert r.status_code == 200
+    assert r.json()["status"] == "error"
+
+
+def test_modify_slot_rejects_unassigned_teacher(client, school_setup):
+    week = school_setup["week_start"]
+    slot = _generated_slots(client, week)[0]
+
+    r = client.post(
+        f"/api/schedule/{week}/modify-slot",
+        json={"slot_id": slot["slot_id"], "changes": {"docente_id": "does-not-exist"}},
+    )
+    assert r.status_code == 200
+    assert r.json()["status"] == "error"
+
+
+def test_modify_slot_on_approved_schedule_is_locked(client, school_setup):
+    week = school_setup["week_start"]
+    slot = _generated_slots(client, week)[0]
+    client.post(f"/api/schedule/{week}/approve")
+
+    r = client.post(
+        f"/api/schedule/{week}/modify-slot",
+        json={"slot_id": slot["slot_id"], "changes": {"giorno": slot["giorno"]}},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "error"
+    assert "locked" in body["message"].lower()
 
 
 def test_apply_quick_action_endpoint_smoke(client, school_setup):
@@ -119,3 +204,63 @@ def test_apply_quick_action_endpoint_smoke(client, school_setup):
         json={"action_type": "force_3_hours_theory", "parameters": {}},
     )
     assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "applied"
+    assert "quality_score" in body
+
+
+def test_apply_quick_action_rejects_unknown_action(client, school_setup):
+    week = school_setup["week_start"]
+    client.post("/api/schedule/generate", json={"week_start": week})
+
+    r = client.post(
+        f"/api/schedule/{week}/apply-quick-action",
+        json={"action_type": "not_a_real_action", "parameters": {}},
+    )
+    assert r.status_code == 200
+    assert r.json()["status"] == "error"
+
+
+def test_apply_quick_action_without_schedule(client, school_setup):
+    r = client.post(
+        "/api/schedule/2099-01-05/apply-quick-action",
+        json={"action_type": "force_3_hours_theory", "parameters": {}},
+    )
+    assert r.status_code == 200
+    assert r.json()["status"] == "error"
+
+
+def test_apply_quick_action_on_approved_schedule_is_locked(client, school_setup):
+    week = school_setup["week_start"]
+    client.post("/api/schedule/generate", json={"week_start": week})
+    client.post(f"/api/schedule/{week}/approve")
+
+    r = client.post(
+        f"/api/schedule/{week}/apply-quick-action",
+        json={"action_type": "force_3_hours_theory", "parameters": {}},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "error"
+    assert "locked" in body["message"].lower()
+
+
+def test_quick_action_override_availability_unlocks_contract_teacher(client, school_setup):
+    """Prof Beta is CONTRATTO with no recorded availability for the week, so
+    the hard availability constraint zeroes out every one of his slots on a
+    plain generation. The 'Deroga disponibilità' quick action, scoped to
+    him, should lift that and let the solver actually use him."""
+    week = school_setup["week_start"]
+    gen = client.post("/api/schedule/generate", json={"week_start": week}).json()
+    assert gen["status"] == "generated"
+    beta_id = school_setup["teachers_by_name"]["Prof Beta"]
+    assert not any(s["docente_id"] == beta_id for s in gen["slots"])
+
+    r = client.post(
+        f"/api/schedule/{week}/apply-quick-action",
+        json={"action_type": "override_availability", "teacher_id": beta_id, "parameters": {}},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "applied"
+    assert any(s["docente_id"] == beta_id for s in body["slots"])

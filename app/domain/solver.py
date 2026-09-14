@@ -86,15 +86,30 @@ class ScheduleContext:
             self.classi_gruppo = {}
 
 
+@dataclass
+class DerogaConfig:
+    """
+    A temporary, single-generation relaxation of one soft/hard constraint,
+    triggered by an admin "quick action" in the UI (e.g. "Forza 3 ore
+    teoria"). Scoped to one classe or docente when given; otherwise applies
+    school-wide for this regeneration only (the relaxation is not persisted
+    anywhere - the next plain regeneration goes back to normal rules).
+    """
+    action_type: str  # one of the QUICK_ACTIONS below
+    classe_id: Optional[str] = None
+    docente_id: Optional[str] = None
+
+
 class ScheduleSolver:
     """
     Constraint Programming solver for school schedule generation.
     Uses Google OR-Tools CP-SAT solver.
     """
 
-    def __init__(self, context: ScheduleContext):
+    def __init__(self, context: ScheduleContext, deroga: Optional[DerogaConfig] = None):
         """Initialize solver with problem context."""
         self.context = context
+        self.deroga = deroga
         self.model = None
         self.solver = None
         self.solution_callback = None
@@ -162,6 +177,20 @@ class ScheduleSolver:
 
         # Hard 6: Don't exceed residual hours
         self._constraint_monte_ore_limit()
+
+    def _deroga_active(self, action_type: str, *, classe_id: str = None, docente_id: str = None) -> bool:
+        """
+        True if `self.deroga` requests relaxing `action_type` and, when the
+        deroga is scoped to a classe/docente, the given one matches (an
+        unscoped deroga applies to everyone).
+        """
+        if not self.deroga or self.deroga.action_type != action_type:
+            return False
+        if self.deroga.classe_id and classe_id and self.deroga.classe_id != classe_id:
+            return False
+        if self.deroga.docente_id and docente_id and self.deroga.docente_id != docente_id:
+            return False
+        return True
 
     def _paired_assignment_ids_to_dedupe(self) -> Set[str]:
         """
@@ -301,6 +330,11 @@ class ScheduleSolver:
             if docente_tipo == "ASSUNTO":
                 continue
 
+            # Deroga: "Deroga disponibilità" - admin override, skip enforcing
+            # the recorded availability for this docente this run.
+            if self._deroga_active("override_availability", docente_id=docente_id):
+                continue
+
             # CONTRATTO: respect giorni_fasce
             disponibilita = self.context.disponibilita_map.get(docente_id)
             if not disponibilita:
@@ -404,6 +438,11 @@ class ScheduleSolver:
         for classe_id in self.context.classi_set:
             classe_teoria = [asg for asg in teoria_asgs if asg.classe_id == classe_id]
 
+            # Deroga: "Forza 3 ore teoria" - raise the no-penalty cap from 2
+            # to 3 consecutive hours for this classe (or every classe, if
+            # the deroga isn't scoped to one).
+            max_consecutive = 3 if self._deroga_active("force_3_hours_theory", classe_id=classe_id) else 2
+
             for giorno in range(5):
                 # Check 3-hour windows (e.g., ora 0-1-2, 1-2-3, etc.)
                 for ora_start in range(4):  # 0-3 (can check up to 5-6)
@@ -416,9 +455,9 @@ class ScheduleSolver:
                     ]
 
                     if hours_in_window:
-                        # Penalize if >2 hours in window
+                        # Penalize if hours in window exceed the cap
                         excess = self.model.NewIntVar(0, 3, f"excess_teoria_{classe_id}_{giorno}_{ora_start}")
-                        self.model.Add(excess >= sum(hours_in_window) - 2)
+                        self.model.Add(excess >= sum(hours_in_window) - max_consecutive)
                         self.soft_penalties.append((excess, weight))
 
     def _soft_pratica_blocks(self) -> None:
@@ -460,6 +499,15 @@ class ScheduleSolver:
             # Target: spread residual hours evenly across remaining weeks
             ore_target = max(1, asg.ore_residue // weeks_in_year)
 
+            # Deroga: "Riduci ore docente a contratto" - halve this week's
+            # target for the affected CONTRATTO docente(i), steering the
+            # optimizer toward assigning them fewer hours this run.
+            if (
+                self.context.docenti_map.get(asg.docente_id) == "CONTRATTO"
+                and self._deroga_active("reduce_contract_hours", docente_id=asg.docente_id)
+            ):
+                ore_target = max(1, ore_target // 2)
+
             # Sum hours assigned this week
             slots_for_asg = [
                 self.x[(asg.assegnazione_id, giorno, ora)]
@@ -488,6 +536,12 @@ class ScheduleSolver:
         ]
 
         for docente_id in set(asg.docente_id for asg in contractor_asgs):
+            # Deroga: "Autorizza uscita anticipata" - stop penalizing gaps
+            # for this docente (or everyone, if unscoped): they're allowed
+            # to leave and come back rather than needing a contiguous block.
+            if self._deroga_active("authorize_early_exit", docente_id=docente_id):
+                continue
+
             docente_asgs = [asg for asg in contractor_asgs if asg.docente_id == docente_id]
 
             for giorno in range(5):
@@ -517,6 +571,25 @@ class ScheduleSolver:
                         gap_penalty = self.model.NewIntVar(0, len(no_slot_vars), f"gap_{docente_id}_{giorno}_{ora}")
                         self.model.Add(gap_penalty >= sum(no_slot_vars) - len(no_slot_vars) + 1)
                         self.soft_penalties.append((gap_penalty, weight // 6))  # distribute weight
+
+    def solve_fixed(self, assigned_keys: Set[Tuple[str, int, int]], timeout_seconds: int = 10) -> str:
+        """
+        Solve the model with every decision variable pinned to a specific,
+        already-decided assignment (e.g. the current schedule after a manual
+        slot edit): 1 for keys in `assigned_keys`, 0 otherwise. Used to check
+        whether a manual edit still satisfies every hard constraint, and to
+        recompute the quality score against the same soft-constraint weights
+        used at generation time, without re-exploring the search space
+        (pinning every variable makes the solve trivial regardless of
+        problem size).
+        """
+        if not self.model:
+            raise ValueError("Model not built. Call build_model() first.")
+
+        for key, var in self.x.items():
+            self.model.Add(var == (1 if key in assigned_keys else 0))
+
+        return self.solve(timeout_seconds=timeout_seconds)
 
     def solve(self, timeout_seconds: int = 60) -> str:
         """
