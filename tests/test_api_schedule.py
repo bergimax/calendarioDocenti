@@ -55,6 +55,41 @@ def test_generated_schedule_pairs_shared_teacher(client, school_setup):
         assert len({s["docente_id"] for s in group}) == 1
 
 
+def test_generated_schedule_includes_itemized_conflicts(client, school_setup):
+    """
+    Regression test: the schedule's `conflicts` list used to not exist at
+    all (the frontend's "Conflitti" panel always read an empty/undefined
+    list). ScheduleSolver.get_conflicts() now turns the actually-violated
+    soft constraints into a human-readable, deduplicated list.
+    """
+    week = school_setup["week_start"]
+    body = client.post("/api/schedule/generate", json={"week_start": week}).json()
+
+    assert body["status"] == "generated"
+    assert body["n_soft_conflicts"] > 0, "fixture is expected to trigger real soft-constraint violations"
+    assert body["conflicts"], "expected at least one itemized conflict"
+
+    valid_actions = {"force_3_hours_theory", "reduce_contract_hours", "authorize_early_exit", "override_availability"}
+    for c in body["conflicts"]:
+        assert c["conflict_id"]
+        assert isinstance(c["description"], str) and c["description"]
+        if c["suggested_action"] is not None:
+            assert c["suggested_action"]["action_type"] in valid_actions
+            assert c["suggested_action"]["label"]
+
+
+def test_get_schedule_recomputes_conflicts_on_reload(client, school_setup):
+    """Conflicts must be recoverable on a plain GET too (a page refresh),
+    not just in the response right after generate/modify/quick-action -
+    see ScheduleService._conflicts_for_persisted_schedule."""
+    week = school_setup["week_start"]
+    generated = client.post("/api/schedule/generate", json={"week_start": week}).json()
+
+    fetched = client.get(f"/api/schedule/{week}").json()
+    assert fetched["conflicts"]
+    assert {c["conflict_id"] for c in fetched["conflicts"]} == {c["conflict_id"] for c in generated["conflicts"]}
+
+
 def test_get_schedule_after_generation(client, school_setup):
     """
     Regression test: the response used to nest everything under a

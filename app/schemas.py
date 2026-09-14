@@ -202,6 +202,9 @@ class ScheduleGenerateResponse(BaseModel):
     message: Optional[str] = None
     conflicting_constraints: Optional[List[str]] = None
     suggested_deroghe: Optional[List[str]] = None
+    # Itemized soft-constraint violations in the generated solution (see
+    # ScheduleSolver.get_conflicts) - matches frontend/src/lib/types.ts's Conflict[].
+    conflicts: Optional[List[Dict[str, Any]]] = None
 
 
 class ModifySlotRequest(BaseModel):

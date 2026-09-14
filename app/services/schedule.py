@@ -107,6 +107,7 @@ class ScheduleService:
                     quality_level=quality_level,
                     n_soft_conflicts=n_conflicts,
                     slots=slot_responses,
+                    conflicts=solver.get_conflicts(),
                 )
 
             elif status == "INFEASIBLE":
@@ -160,7 +161,44 @@ class ScheduleService:
         if not schedule:
             return None
 
-        return {"status": "found", **schedule}
+        return {"status": "found", "conflicts": self._conflicts_for_persisted_schedule(scuola_id, week_start, schedule), **schedule}
+
+    def _conflicts_for_persisted_schedule(
+        self, scuola_id: str, week_start: date, schedule: Dict[str, Any],
+    ) -> list:
+        """
+        Recover the itemized soft-constraint conflicts for a schedule as
+        currently persisted (get_schedule has no freshly-solved
+        ScheduleSolver in hand the way generate/modify/quick-action do):
+        rebuild the model and pin it to the persisted slots (see
+        ScheduleSolver.solve_fixed), then read its soft_penalties. Returns
+        [] if the persisted slots no longer satisfy the hard constraints
+        (underlying data changed since) rather than raising.
+        """
+        from app.domain.solver import ScheduleSolver, GiornoEnum
+
+        context = self.repo.get_week_context(scuola_id, week_start)
+        if not context.assegnazioni:
+            return []
+
+        assigned_keys = set()
+        for s in schedule["slots"]:
+            asg = next(
+                (a for a in context.assegnazioni
+                 if a.classe_id == s["classe_id"] and a.materia_id == s["materia_id"]
+                 and a.docente_id == s["docente_id"]),
+                None,
+            )
+            if asg:
+                assigned_keys.add((asg.assegnazione_id, GiornoEnum[s["giorno"]].value, s["ora_inizio"] - 8))
+
+        solver = ScheduleSolver(context)
+        solver.build_model()
+        status = solver.solve_fixed(assigned_keys)
+        if status not in ("OPTIMAL", "FEASIBLE"):
+            return []
+
+        return solver.get_conflicts()
 
     # ===== Helper Methods =====
 
@@ -402,7 +440,7 @@ class ScheduleService:
         self.db.commit()
 
         updated = self.repo.get_schedule_by_week(scuola_id, week_start)
-        return {"status": "modified", **updated}
+        return {"status": "modified", "conflicts": solver.get_conflicts(), **updated}
 
     def apply_quick_action(
         self,
@@ -590,7 +628,7 @@ class ScheduleService:
             return {"status": "error", "message": str(e)}
 
         updated = self.repo.get_schedule_by_week(scuola_id, week_start)
-        return {"status": success_status, **updated}
+        return {"status": success_status, "conflicts": solver.get_conflicts(), **updated}
 
     def export_pdf(self, scuola_id: str, week_start: date) -> Dict[str, Any]:
         """

@@ -215,7 +215,7 @@ def test_soft_constraint_weights_are_applied_to_objective():
     solver.build_model()
 
     assert solver.soft_penalties, "expected at least one soft constraint to be registered"
-    weights_used = {weight for _, weight in solver.soft_penalties}
+    weights_used = {p.weight for p in solver.soft_penalties}
     assert weights_used != {1}, "soft constraints should use their documented weights, not all 1"
 
     objective_coeffs = set(solver.model.Proto().objective.coeffs)
