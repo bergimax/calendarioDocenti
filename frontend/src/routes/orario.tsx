@@ -28,6 +28,16 @@ export const Route = createFileRoute("/orario")({
 
 const ORE = ["08:00", "09:00", "10:00", "11:00", "12:00", "13:00"];
 
+// Backend giorno values are uppercase ("LUNEDI".."VENERDI"); these are the
+// select-option values sent back to modify-slot, paired with a readable label.
+const GIORNI = [
+  { value: "LUNEDI", label: "Lunedì" },
+  { value: "MARTEDI", label: "Martedì" },
+  { value: "MERCOLEDI", label: "Mercoledì" },
+  { value: "GIOVEDI", label: "Giovedì" },
+  { value: "VENERDI", label: "Venerdì" },
+];
+
 const QUICK_ACTIONS = [
   { action_type: "force_3_hours_theory", label: "Forza 3 ore teoria" },
   { action_type: "reduce_contract_hours", label: "Riduci ore docente a contratto" },
@@ -306,7 +316,13 @@ function ScheduleTable({
 
   const byCell = new Map<string, SlotLezione>();
   for (const s of schedule.slots) {
-    if (s.giorno === giorno) byCell.set(`${s.ora_inizio}|${s.classe_id}`, s);
+    // s.giorno comes from the backend as "LUNEDI".."VENERDI" (uppercase);
+    // the tab state below is lowercase for the nice capitalize styling.
+    // s.ora_inizio is a number (8, 9, ...) despite the SlotLezione type
+    // saying string - normalize to "08:00" to match the ORE row labels.
+    if (s.giorno !== giorno.toUpperCase()) continue;
+    const oraKey = `${String(s.ora_inizio).padStart(2, "0")}:00`;
+    byCell.set(`${oraKey}|${s.classe_id}`, s);
   }
 
   return (
@@ -524,9 +540,9 @@ function ModifySlotPanel({
         </button>
       </div>
       <Select label="Giorno" value={giorno} onChange={(e) => setGiorno(e.target.value)}>
-        {["lunedi", "martedi", "mercoledi", "giovedi", "venerdi"].map((g) => (
-          <option key={g} value={g}>
-            {g}
+        {GIORNI.map(({ value, label }) => (
+          <option key={value} value={value}>
+            {label}
           </option>
         ))}
       </Select>
