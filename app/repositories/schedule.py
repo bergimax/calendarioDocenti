@@ -110,6 +110,7 @@ class ScheduleRepository:
                     data=cal.data,
                     giorno=giorno,
                     ore_max_giornata=cal.ore_max_giornata,
+                    gruppo=cal.gruppo,
                     flag_stage_classe_id=cal.flag_stage_classe_id,
                     flag_chiusura=cal.flag_chiusura,
                 )
@@ -144,6 +145,13 @@ class ScheduleRepository:
         for asg_data in assegnazioni_dati:
             materie_map[asg_data.materia_id] = asg_data.materia_tipo
 
+        # 7. Build classi -> gruppo map (year-group label, for per-group PDF calendars)
+        classi_gruppo = {}
+        for classe_id in classi_set:
+            classe = self.db.query(Classe).filter_by(id=classe_id).first()
+            if classe:
+                classi_gruppo[classe_id] = classe.gruppo
+
         logger.info(f"Context built: {len(assegnazioni_dati)} asgs, {len(docenti_map)} teachers, {len(classi_set)} classes")
 
         return ScheduleContext(
@@ -158,6 +166,7 @@ class ScheduleRepository:
             docenti_map=docenti_map,
             classi_set=classi_set,
             materie_map=materie_map,
+            classi_gruppo=classi_gruppo,
         )
 
     def save_generated_schedule(
@@ -176,17 +185,35 @@ class ScheduleRepository:
         logger.info(f"Saving schedule: {len(slots)} slots, score {quality_score:.1f}")
 
         try:
-            # Create OrarioSettimanale record
-            orario = OrarioSettimanale(
-                scuola_id=scuola_id,
-                settimana_inizio=week_start,
-                stato="BOZZA",
-                quality_score=quality_score,
-                quality_level=quality_level,
-                n_conflitti_soft=n_soft_conflicts,
-            )
-            self.db.add(orario)
-            self.db.flush()  # Get orario.id
+            # Regenerating a week that already has a schedule replaces its
+            # slots in place (same id) instead of inserting a second
+            # OrarioSettimanale row for the same scuola_id/week_start, which
+            # would make get_schedule_by_week's lookup pick an arbitrary one.
+            orario = self.db.query(OrarioSettimanale).filter(
+                OrarioSettimanale.scuola_id == scuola_id,
+                OrarioSettimanale.settimana_inizio == week_start,
+            ).first()
+
+            if orario:
+                self.db.query(SlotLezione).filter(
+                    SlotLezione.orario_settimanale_id == orario.id
+                ).delete(synchronize_session=False)
+                orario.stato = "BOZZA"
+                orario.quality_score = quality_score
+                orario.quality_level = quality_level
+                orario.n_conflitti_soft = n_soft_conflicts
+                orario.approved_at = None
+            else:
+                orario = OrarioSettimanale(
+                    scuola_id=scuola_id,
+                    settimana_inizio=week_start,
+                    stato="BOZZA",
+                    quality_score=quality_score,
+                    quality_level=quality_level,
+                    n_conflitti_soft=n_soft_conflicts,
+                )
+                self.db.add(orario)
+                self.db.flush()  # Get orario.id
 
             # Bulk insert SlotLezione records
             for slot in slots:
@@ -241,6 +268,7 @@ class ScheduleRepository:
                 "docente_nome": slot.docente.nome if slot.docente else None,
                 "materia_id": slot.materia_id,
                 "materia_nome": slot.materia.nome if slot.materia else None,
+                "materia_tipo": slot.materia.tipo if slot.materia else None,
                 "giorno": slot.giorno,
                 "ora_inizio": slot.ora_inizio,
                 "ora_fine": slot.ora_fine,

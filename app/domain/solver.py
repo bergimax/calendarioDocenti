@@ -1,11 +1,16 @@
 from dataclasses import dataclass
 from datetime import date, timedelta
-from typing import Dict, List, Tuple, Optional, Set
+from typing import Any, Dict, List, Tuple, Optional, Set
 from enum import Enum
 from ortools.sat.python import cp_model
 import logging
 
 logger = logging.getLogger(__name__)
+
+GIORNI_NOMI_IT = {
+    "LUNEDI": "Lunedì", "MARTEDI": "Martedì", "MERCOLEDI": "Mercoledì",
+    "GIOVEDI": "Giovedì", "VENERDI": "Venerdì",
+}
 
 
 class GiornoEnum(Enum):
@@ -42,10 +47,18 @@ class DisponibilitaDati:
 
 @dataclass
 class CalendarioDati:
-    """Calendar day data for week."""
+    """
+    Calendar day data for week.
+    gruppo=None means this row applies school-wide (every classe); a
+    non-None gruppo restricts it to classi whose gruppo matches (used for a
+    calendar extracted from a per-year-group PDF, where daily hours differ
+    by year group). Multiple rows can share the same (data, giorno) as long
+    as their gruppo differs.
+    """
     data: date
     giorno: int  # 0-4
     ore_max_giornata: int
+    gruppo: Optional[str] = None
     flag_stage_classe_id: Optional[str] = None
     flag_chiusura: bool = False
 
@@ -71,6 +84,49 @@ class ScheduleContext:
     docenti_map: Dict[str, str]  # docente_id -> docente_tipo
     classi_set: Set[str]  # all classe_ids
     materie_map: Dict[str, str]  # materia_id -> materia_tipo
+    classi_gruppo: Dict[str, Optional[str]] = None  # classe_id -> gruppo (year-group label)
+
+    def __post_init__(self):
+        if self.classi_gruppo is None:
+            self.classi_gruppo = {}
+
+
+@dataclass
+class DerogaConfig:
+    """
+    A temporary, single-generation relaxation of one soft/hard constraint,
+    triggered by an admin "quick action" in the UI (e.g. "Forza 3 ore
+    teoria"). Scoped to one classe or docente when given; otherwise applies
+    school-wide for this regeneration only (the relaxation is not persisted
+    anywhere - the next plain regeneration goes back to normal rules).
+    """
+    action_type: str  # one of the QUICK_ACTIONS below
+    classe_id: Optional[str] = None
+    docente_id: Optional[str] = None
+
+
+@dataclass
+class SoftPenalty:
+    """
+    One soft-constraint violation instance the objective can penalize -
+    carries enough context (beyond the raw IntVar/weight the objective
+    needs) to describe it to an admin and, where one applies, point at the
+    quick-action deroga that would relax it. See ScheduleSolver.get_conflicts.
+    """
+    var: Any  # cp_model IntVar; > 0 in the solution means this is violated
+    weight: int
+    kind: str  # "teoria_consecutive" | "ore_target_deviation" | "contractor_gap"
+    description: str
+    classe_id: Optional[str] = None
+    docente_id: Optional[str] = None
+    giorno: Optional[int] = None
+    suggested_action: Optional[Dict[str, str]] = None
+    # ore_target_deviation only: the assigned-hours vars + target, to work
+    # out (after solving) whether this docente is over or under target -
+    # only "over" for a CONTRATTO docente gets a suggested_action.
+    hour_vars: Optional[List[Any]] = None
+    ore_target: Optional[int] = None
+    docente_tipo: Optional[str] = None
 
 
 class ScheduleSolver:
@@ -79,9 +135,34 @@ class ScheduleSolver:
     Uses Google OR-Tools CP-SAT solver.
     """
 
-    def __init__(self, context: ScheduleContext):
-        """Initialize solver with problem context."""
+    def __init__(
+        self,
+        context: ScheduleContext,
+        deroga: Optional[DerogaConfig] = None,
+        exclude_docente_giorno: Optional[Set[Tuple[str, int]]] = None,
+        max_hours_per_docente: Optional[Dict[str, int]] = None,
+        max_consecutive_teoria: Optional[int] = None,
+    ):
+        """
+        Initialize solver with problem context.
+
+        The last three arguments exist for the AI chat's move/exclude/reduce
+        requests (app/services/chat.py): unlike `deroga` (relaxes one rule),
+        these *add* extra hard/soft restrictions for one regeneration -
+        temporary and week-scoped, the same as a deroga, just tightening
+        instead of loosening.
+        - exclude_docente_giorno: {(docente_id, giorno_idx)} forced to 0
+          hours that day (e.g. "escludi Prof Rossi martedì").
+        - max_hours_per_docente: {docente_id: cap} hard weekly-hours cap
+          (e.g. "riduci ore Prof Rossi a massimo 10").
+        - max_consecutive_teoria: overrides the default 2-hour no-penalty
+          cap for _soft_teoria_consecutive school-wide.
+        """
         self.context = context
+        self.deroga = deroga
+        self.exclude_docente_giorno = exclude_docente_giorno or set()
+        self.max_hours_per_docente = max_hours_per_docente or {}
+        self.max_consecutive_teoria = max_consecutive_teoria
         self.model = None
         self.solver = None
         self.solution_callback = None
@@ -111,9 +192,11 @@ class ScheduleSolver:
         # 3. Add soft constraints
         self._add_soft_constraints()
 
-        # 4. Set objective function
+        # 4. Set objective function (weighted sum: `weight` was previously
+        # computed per soft constraint but silently dropped here, so every
+        # soft violation cost the same regardless of its intended priority)
         if self.soft_penalties:
-            self.model.Minimize(sum(penalty for penalty, _ in self.soft_penalties))
+            self.model.Minimize(sum(p.var * p.weight for p in self.soft_penalties))
 
         logger.info(f"Model built: {len(self.x)} variables, {len(self.model.Proto().constraints)} constraints")
         return self
@@ -148,8 +231,55 @@ class ScheduleSolver:
         # Hard 6: Don't exceed residual hours
         self._constraint_monte_ore_limit()
 
+        # Hard 7 & 8: AI-chat-requested exclusions/caps for this run (see __init__)
+        self._constraint_chat_exclusions()
+        self._constraint_chat_max_hours()
+
+    def _deroga_active(self, action_type: str, *, classe_id: str = None, docente_id: str = None) -> bool:
+        """
+        True if `self.deroga` requests relaxing `action_type` and, when the
+        deroga is scoped to a classe/docente, the given one matches (an
+        unscoped deroga applies to everyone).
+        """
+        if not self.deroga or self.deroga.action_type != action_type:
+            return False
+        if self.deroga.classe_id and classe_id and self.deroga.classe_id != classe_id:
+            return False
+        if self.deroga.docente_id and docente_id and self.deroga.docente_id != docente_id:
+            return False
+        return True
+
+    def _paired_assignment_ids_to_dedupe(self) -> Set[str]:
+        """
+        When the same docente teaches both sides of a classe-accoppiata for the
+        common materia (the spec-intended case), _constraint_paired_classes
+        forces their two assegnazioni to always be equal (x_a == x_b): they
+        represent a single joint lesson, not two separate bookings. Without
+        this, _constraint_no_double_booking would sum both into the same
+        docente/giorno/ora slot and force the pair to always be 0 (sum <= 1
+        vs. x_a == x_b == 1 is unsatisfiable). Returns the assegnazione_ids
+        of the "B" side of such pairs, to be excluded from that sum.
+        """
+        skip_ids: Set[str] = set()
+        for classe_a, classe_b, materia_id in self.context.classi_accoppiate:
+            asg_a = next(
+                (a for a in self.context.assegnazioni
+                 if a.classe_id == classe_a and a.materia_id == materia_id),
+                None,
+            )
+            asg_b = next(
+                (a for a in self.context.assegnazioni
+                 if a.classe_id == classe_b and a.materia_id == materia_id),
+                None,
+            )
+            if asg_a and asg_b and asg_a.docente_id == asg_b.docente_id:
+                skip_ids.add(asg_b.assegnazione_id)
+        return skip_ids
+
     def _constraint_no_double_booking(self) -> None:
         """Hard constraint 1: No teacher can teach 2 classes in same hour."""
+        skip_ids = self._paired_assignment_ids_to_dedupe()
+
         # Group assegnazioni by docente
         docenti_asgs = {}
         for asg in self.context.assegnazioni:
@@ -164,10 +294,32 @@ class ScheduleSolver:
                     overlapping = [
                         self.x[(asg.assegnazione_id, giorno, ora)]
                         for asg in asgs
-                        if (asg.assegnazione_id, giorno, ora) in self.x
+                        if asg.assegnazione_id not in skip_ids
+                        and (asg.assegnazione_id, giorno, ora) in self.x
                     ]
                     if overlapping:
                         self.model.Add(sum(overlapping) <= 1)
+
+    def _ore_max_for_classe_giorno(self, classe_id: str, giorno: int) -> int:
+        """
+        Resolve the daily hour cap for a classe on a given giorno.
+        Looks for a calendar row scoped to this classe's gruppo first (a
+        per-year-group PDF calendar), then falls back to a school-wide row
+        (gruppo=None, e.g. a plain CSV calendar or an inferred closure), then
+        to a hardcoded default if neither exists.
+        """
+        gruppo = self.context.classi_gruppo.get(classe_id)
+
+        if gruppo is not None:
+            for c in self.context.calendario:
+                if c.giorno == giorno and c.gruppo == gruppo:
+                    return 0 if c.flag_chiusura else c.ore_max_giornata
+
+        for c in self.context.calendario:
+            if c.giorno == giorno and c.gruppo is None:
+                return 0 if c.flag_chiusura else c.ore_max_giornata
+
+        return 6  # no calendar data at all for this day: default
 
     def _constraint_day_capacity(self) -> None:
         """Hard constraint 2: Per-class daily hours <= ore_max_giornata."""
@@ -181,16 +333,7 @@ class ScheduleSolver:
         # For each classe/giorno
         for classe_id, asgs in classi_asgs.items():
             for giorno in range(5):
-                # Find max hours for this day
-                cal_entry = next(
-                    (c for c in self.context.calendario if c.giorno == giorno),
-                    None
-                )
-                if not cal_entry:
-                    continue
-
-                # Closure days (holidays/extraordinary closures) have zero capacity
-                ore_max = 0 if cal_entry.flag_chiusura else cal_entry.ore_max_giornata
+                ore_max = self._ore_max_for_classe_giorno(classe_id, giorno)
 
                 # Sum all hours for this classe/giorno
                 hours_in_day = [
@@ -242,6 +385,11 @@ class ScheduleSolver:
 
             # ASSUNTO: implicit (already limited to 0-5 which is 8-14)
             if docente_tipo == "ASSUNTO":
+                continue
+
+            # Deroga: "Deroga disponibilità" - admin override, skip enforcing
+            # the recorded availability for this docente this run.
+            if self._deroga_active("override_availability", docente_id=docente_id):
                 continue
 
             # CONTRATTO: respect giorni_fasce
@@ -321,6 +469,35 @@ class ScheduleSolver:
                 if slots_for_asg:
                     self.model.Add(sum(slots_for_asg) <= asg.ore_residue)
 
+    def _constraint_chat_exclusions(self) -> None:
+        """Hard constraint 7: zero out a docente's hours on a specific giorno (chat "escludi ... giorno")."""
+        if not self.exclude_docente_giorno:
+            return
+        for asg in self.context.assegnazioni:
+            for giorno in range(5):
+                if (asg.docente_id, giorno) not in self.exclude_docente_giorno:
+                    continue
+                for ora in range(6):
+                    key = (asg.assegnazione_id, giorno, ora)
+                    if key in self.x:
+                        self.model.Add(self.x[key] == 0)
+
+    def _constraint_chat_max_hours(self) -> None:
+        """Hard constraint 8: cap a docente's total weekly hours (chat "riduci ore ... massimo N")."""
+        if not self.max_hours_per_docente:
+            return
+        for docente_id, cap in self.max_hours_per_docente.items():
+            slots_for_docente = [
+                self.x[(asg.assegnazione_id, giorno, ora)]
+                for asg in self.context.assegnazioni
+                if asg.docente_id == docente_id
+                for giorno in range(5)
+                for ora in range(6)
+                if (asg.assegnazione_id, giorno, ora) in self.x
+            ]
+            if slots_for_docente:
+                self.model.Add(sum(slots_for_docente) <= cap)
+
     def _add_soft_constraints(self) -> None:
         """Add soft constraints (optimizable)."""
         logger.info("Adding soft constraints...")
@@ -346,6 +523,17 @@ class ScheduleSolver:
 
         for classe_id in self.context.classi_set:
             classe_teoria = [asg for asg in teoria_asgs if asg.classe_id == classe_id]
+            classe_nome = classe_teoria[0].classe_nome if classe_teoria else classe_id
+
+            # Base cap: 2, unless the chat asked for a specific value
+            # ("imposta massimo 3 ore consecutive di teoria").
+            max_consecutive = self.max_consecutive_teoria if self.max_consecutive_teoria is not None else 2
+
+            # Deroga: "Forza 3 ore teoria" - raise the no-penalty cap to 3
+            # consecutive hours for this classe (or every classe, if the
+            # deroga isn't scoped to one).
+            if self._deroga_active("force_3_hours_theory", classe_id=classe_id):
+                max_consecutive = 3
 
             for giorno in range(5):
                 # Check 3-hour windows (e.g., ora 0-1-2, 1-2-3, etc.)
@@ -359,33 +547,90 @@ class ScheduleSolver:
                     ]
 
                     if hours_in_window:
-                        # Penalize if >2 hours in window
+                        # Penalize if hours in window exceed the cap
                         excess = self.model.NewIntVar(0, 3, f"excess_teoria_{classe_id}_{giorno}_{ora_start}")
-                        self.model.Add(excess >= sum(hours_in_window) - 2)
-                        self.soft_penalties.append((excess, weight))
+                        self.model.Add(excess >= sum(hours_in_window) - max_consecutive)
+                        self.soft_penalties.append(SoftPenalty(
+                            var=excess, weight=weight, kind="teoria_consecutive",
+                            description=(
+                                f"Troppe ore di teoria consecutive per {classe_nome} "
+                                f"({GIORNI_NOMI_IT[GiornoEnum(giorno).name]})"
+                            ),
+                            classe_id=classe_id, giorno=giorno,
+                            suggested_action={"action_type": "force_3_hours_theory", "label": "Forza 3 ore teoria"},
+                        ))
 
     def _soft_pratica_blocks(self) -> None:
-        """Soft: Practice should be in 3-6 hour blocks."""
-        weight = 8
+        """
+        Soft: PRATICA/laboratorio hours should form one 3-6 hour block per
+        day per assegnazione (specs.md 4.1: "blocchi da 3 a 6 ore, adattati
+        alla capienza massima del giorno se la giornata è corta"), not
+        scattered single hours through the week.
 
-        # This is complex: we want continuous blocks of 3-6 hours for same (classe, docente, materia)
-        # For MVP, simplify: minimize isolated practice hours (alone without before/after)
+        Two complementary penalties approximate "one contiguous block in
+        [3,6]" without a full interval-scheduling formulation:
+        1. the day's total hours for this assegnazione, if any are
+           scheduled that day at all, penalized for falling below
+           min(3, day_cap) - day_cap adapts the target down on a short
+           day. There's no symmetric "too long" check: this assegnazione's
+           hours that day are already a subset of the classe's daily
+           total, which _constraint_day_capacity hard-caps at day_cap
+           (<=6, the whole 08:00-14:00 window), so a block exceeding 6h
+           can't occur in the first place;
+        2. a "hole": an hour with practice both immediately before and
+           after it but not itself scheduled - same gap-detection idiom as
+           _soft_contractor_gaps - penalizes scattering the day's hours
+           into disconnected pieces even when the total is already within
+           range.
+        """
+        weight = 8
 
         pratica_asgs = [asg for asg in self.context.assegnazioni if asg.materia_tipo == "PRATICA"]
 
-        for giorno in range(5):
-            for ora in range(6):
-                for asg in pratica_asgs:
-                    key = (asg.assegnazione_id, giorno, ora)
-                    if key not in self.x:
-                        continue
+        for asg in pratica_asgs:
+            for giorno in range(5):
+                hours = [
+                    self.x[(asg.assegnazione_id, giorno, ora)]
+                    for ora in range(6)
+                    if (asg.assegnazione_id, giorno, ora) in self.x
+                ]
+                if not hours:
+                    continue
 
-                    # Check if this slot is isolated (no adjacent slots same asg)
-                    has_before = (asg.assegnazione_id, giorno, ora - 1) in self.x and ora > 0
-                    has_after = (asg.assegnazione_id, giorno, ora + 1) in self.x and ora < 5
+                day_cap = self._ore_max_for_classe_giorno(asg.classe_id, giorno)
+                low = min(3, day_cap)
+                ore_in_day = sum(hours)
+                giorno_nome = GIORNI_NOMI_IT[GiornoEnum(giorno).name]
 
-                    # Isolated slot gets small penalty (can coexist with other asgs)
-                    # For now, skip complex logic
+                # Too-short block, only counted on a day this assegnazione
+                # actually has practice hours at all (a day with none
+                # isn't "a block", so it isn't penalized).
+                used = self.model.NewBoolVar(f"pratica_used_{asg.assegnazione_id}_{giorno}")
+                self.model.Add(ore_in_day >= 1).OnlyEnforceIf(used)
+                self.model.Add(ore_in_day == 0).OnlyEnforceIf(used.Not())
+
+                too_short = self.model.NewIntVar(0, 6, f"pratica_short_{asg.assegnazione_id}_{giorno}")
+                self.model.Add(too_short >= low - ore_in_day).OnlyEnforceIf(used)
+                self.model.Add(too_short == 0).OnlyEnforceIf(used.Not())
+                self.soft_penalties.append(SoftPenalty(
+                    var=too_short, weight=weight, kind="pratica_block_short",
+                    description=f"Blocco pratica troppo corto per {asg.classe_nome}/{asg.materia_nome} ({giorno_nome})",
+                    classe_id=asg.classe_id, giorno=giorno,
+                ))
+
+                # Holes inside an otherwise-active span.
+                for ora in range(1, 5):
+                    before = (asg.assegnazione_id, giorno, ora - 1)
+                    here = (asg.assegnazione_id, giorno, ora)
+                    after = (asg.assegnazione_id, giorno, ora + 1)
+                    if before in self.x and here in self.x and after in self.x:
+                        hole = self.model.NewIntVar(0, 1, f"pratica_hole_{asg.assegnazione_id}_{giorno}_{ora}")
+                        self.model.Add(hole >= self.x[before] + self.x[after] - 1 - self.x[here])
+                        self.soft_penalties.append(SoftPenalty(
+                            var=hole, weight=weight, kind="pratica_block_gap",
+                            description=f"Ore di pratica non contigue per {asg.classe_nome}/{asg.materia_nome} ({giorno_nome})",
+                            classe_id=asg.classe_id, giorno=giorno,
+                        ))
 
     def _soft_ore_target_deviation(self) -> None:
         """Soft: Minimize deviation from target hours per assegnazione (weight 15)."""
@@ -403,6 +648,15 @@ class ScheduleSolver:
             # Target: spread residual hours evenly across remaining weeks
             ore_target = max(1, asg.ore_residue // weeks_in_year)
 
+            # Deroga: "Riduci ore docente a contratto" - halve this week's
+            # target for the affected CONTRATTO docente(i), steering the
+            # optimizer toward assigning them fewer hours this run.
+            if (
+                self.context.docenti_map.get(asg.docente_id) == "CONTRATTO"
+                and self._deroga_active("reduce_contract_hours", docente_id=asg.docente_id)
+            ):
+                ore_target = max(1, ore_target // 2)
+
             # Sum hours assigned this week
             slots_for_asg = [
                 self.x[(asg.assegnazione_id, giorno, ora)]
@@ -419,7 +673,16 @@ class ScheduleSolver:
                 self.model.Add(deviation >= ore_assigned - ore_target)
                 self.model.Add(deviation >= ore_target - ore_assigned)
 
-                self.soft_penalties.append((deviation, weight))
+                self.soft_penalties.append(SoftPenalty(
+                    var=deviation, weight=weight, kind="ore_target_deviation",
+                    description=(
+                        f"Ore di {asg.docente_nome} su {asg.classe_nome}/{asg.materia_nome} "
+                        f"lontane dal target settimanale ({ore_target}h)"
+                    ),
+                    classe_id=asg.classe_id, docente_id=asg.docente_id,
+                    hour_vars=slots_for_asg, ore_target=ore_target,
+                    docente_tipo=self.context.docenti_map.get(asg.docente_id),
+                ))
 
     def _soft_contractor_gaps(self) -> None:
         """Soft: Minimize gaps (hole hours) for contractors (weight 12)."""
@@ -431,7 +694,14 @@ class ScheduleSolver:
         ]
 
         for docente_id in set(asg.docente_id for asg in contractor_asgs):
+            # Deroga: "Autorizza uscita anticipata" - stop penalizing gaps
+            # for this docente (or everyone, if unscoped): they're allowed
+            # to leave and come back rather than needing a contiguous block.
+            if self._deroga_active("authorize_early_exit", docente_id=docente_id):
+                continue
+
             docente_asgs = [asg for asg in contractor_asgs if asg.docente_id == docente_id]
+            docente_nome = docente_asgs[0].docente_nome if docente_asgs else docente_id
 
             for giorno in range(5):
                 # Find first and last hours with slots
@@ -459,7 +729,36 @@ class ScheduleSolver:
                     if no_slot_vars:
                         gap_penalty = self.model.NewIntVar(0, len(no_slot_vars), f"gap_{docente_id}_{giorno}_{ora}")
                         self.model.Add(gap_penalty >= sum(no_slot_vars) - len(no_slot_vars) + 1)
-                        self.soft_penalties.append((gap_penalty, weight // 6))  # distribute weight
+                        self.soft_penalties.append(SoftPenalty(
+                            var=gap_penalty, weight=weight // 6, kind="contractor_gap",  # distribute weight
+                            description=(
+                                f"Buchi orari per {docente_nome} (contratto) "
+                                f"({GIORNI_NOMI_IT[GiornoEnum(giorno).name]})"
+                            ),
+                            docente_id=docente_id, giorno=giorno,
+                            suggested_action={
+                                "action_type": "authorize_early_exit", "label": "Autorizza uscita anticipata",
+                            },
+                        ))
+
+    def solve_fixed(self, assigned_keys: Set[Tuple[str, int, int]], timeout_seconds: int = 10) -> str:
+        """
+        Solve the model with every decision variable pinned to a specific,
+        already-decided assignment (e.g. the current schedule after a manual
+        slot edit): 1 for keys in `assigned_keys`, 0 otherwise. Used to check
+        whether a manual edit still satisfies every hard constraint, and to
+        recompute the quality score against the same soft-constraint weights
+        used at generation time, without re-exploring the search space
+        (pinning every variable makes the solve trivial regardless of
+        problem size).
+        """
+        if not self.model:
+            raise ValueError("Model not built. Call build_model() first.")
+
+        for key, var in self.x.items():
+            self.model.Add(var == (1 if key in assigned_keys else 0))
+
+        return self.solve(timeout_seconds=timeout_seconds)
 
     def solve(self, timeout_seconds: int = 60) -> str:
         """
@@ -550,8 +849,8 @@ class ScheduleSolver:
         soft_satisfied = 0
         soft_total = len(self.soft_penalties)
 
-        for penalty, weight in self.soft_penalties:
-            if self.solver.Value(penalty) == 0:
+        for p in self.soft_penalties:
+            if self.solver.Value(p.var) == 0:
                 soft_satisfied += 1
 
         if soft_total == 0:
@@ -572,3 +871,48 @@ class ScheduleSolver:
         logger.info(f"Quality score: {score:.1f}% ({soft_satisfied}/{soft_total} soft constraints), level {level}")
 
         return score, level, n_conflicts
+
+    def get_conflicts(self) -> List[Dict[str, Any]]:
+        """
+        Human-readable list of the soft-constraint violations in the
+        current solution (frontend/src/lib/types.ts's Conflict[], shown in
+        the "Conflitti" panel). Deduplicated per (kind, classe_id,
+        docente_id, giorno) so a run of consecutive violated hours/windows
+        doesn't flood the UI with near-identical entries - one entry per
+        distinct problem area instead.
+        """
+        if self.status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            return []
+
+        seen: Set[Tuple] = set()
+        conflicts: List[Dict[str, Any]] = []
+
+        for i, p in enumerate(self.soft_penalties):
+            if self.solver.Value(p.var) <= 0:
+                continue
+
+            suggested_action = p.suggested_action
+            if p.kind == "ore_target_deviation":
+                # Only suggest "reduce hours" when they're actually OVER
+                # target (and only makes sense for a CONTRATTO docente);
+                # under target has no quick-action fix.
+                ore_assigned = sum(self.solver.Value(v) for v in (p.hour_vars or []))
+                if p.docente_tipo == "CONTRATTO" and p.ore_target is not None and ore_assigned > p.ore_target:
+                    suggested_action = {
+                        "action_type": "reduce_contract_hours", "label": "Riduci ore docente a contratto",
+                    }
+                else:
+                    suggested_action = None
+
+            dedup_key = (p.kind, p.classe_id, p.docente_id, p.giorno)
+            if dedup_key in seen:
+                continue
+            seen.add(dedup_key)
+
+            conflicts.append({
+                "conflict_id": f"{p.kind}_{p.classe_id or ''}_{p.docente_id or ''}_{p.giorno}_{i}",
+                "description": p.description,
+                "suggested_action": suggested_action,
+            })
+
+        return conflicts

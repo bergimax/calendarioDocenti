@@ -58,6 +58,7 @@ class SetupRepository:
                 scuola_id=scuola_id,
                 nome=data["nome"],
                 n_studenti=data.get("n_studenti", 0),
+                gruppo=data.get("gruppo"),
             )
             self.db.add(classe)
             self.db.flush()
@@ -110,6 +111,7 @@ class SetupRepository:
             cal = CalendarioAnnuale(
                 scuola_id=scuola_id,
                 data=data["data"],
+                gruppo=data.get("gruppo"),
                 ore_max_giornata=data.get("ore_max_giornata", 6),
                 flag_chiusura=data.get("flag_chiusura", False),
                 flag_stage_classe_id=data.get("flag_stage_classe_id"),

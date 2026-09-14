@@ -73,13 +73,154 @@ class ChatNLP:
         # Pattern matching as fallback
         return self._parse_with_patterns(message, context)
 
+    _DAY_ENUM = ["lunedi", "martedi", "mercoledi", "giovedi", "venerdi"]
+    _LLM_MODEL = "claude-haiku-4-5-20251001"
+
+    def _llm_tools(self) -> List[Dict[str, Any]]:
+        """One tool per supported intent; Claude calls at most one, with
+        only the parameters it actually found in the message (no invented
+        defaults - the JSON schema's `required` list plus our own
+        `_missing_required_params` check below catch anything it leaves
+        out, which then becomes a clarification question to the admin)."""
+        return [
+            {
+                "name": IntentType.MOVE_LESSON.value,
+                "description": "Sposta una lezione (materia + classe) da un giorno a un altro della settimana corrente.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "subject": {"type": "string", "description": "Nome della materia, es. 'Matematica'"},
+                        "class": {"type": "string", "description": "Nome della classe, es. '1A'"},
+                        "from_day": {"type": "string", "enum": self._DAY_ENUM},
+                        "to_day": {"type": "string", "enum": self._DAY_ENUM},
+                    },
+                    "required": ["subject", "class", "from_day", "to_day"],
+                },
+            },
+            {
+                "name": IntentType.REDUCE_WORKLOAD.value,
+                "description": "Riduce il monte ore settimanale massimo di un docente.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "teacher": {"type": "string", "description": "Nome del docente"},
+                        "max_hours": {"type": "integer", "description": "Numero massimo di ore settimanali"},
+                    },
+                    "required": ["teacher", "max_hours"],
+                },
+            },
+            {
+                "name": IntentType.EXCLUDE_DAY.value,
+                "description": "Esclude un docente dall'orario in un giorno specifico della settimana.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "teacher": {"type": "string"},
+                        "day": {"type": "string", "enum": self._DAY_ENUM},
+                    },
+                    "required": ["teacher", "day"],
+                },
+            },
+            {
+                "name": IntentType.SET_SOFT_CONSTRAINT.value,
+                "description": "Imposta un vincolo morbido dell'orario, es. il numero massimo di ore consecutive di teoria.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "constraint_type": {"type": "string", "enum": ["consecutive_hours"]},
+                        "subject_type": {"type": "string", "enum": ["TEORIA", "PRATICA"]},
+                        "max_hours": {"type": "integer"},
+                    },
+                    "required": ["constraint_type", "max_hours"],
+                },
+            },
+        ]
+
+    def _missing_required_params(self, intent_type: "IntentType", params: Dict[str, Any]) -> List[str]:
+        """Same clarification questions as the pattern-matching path, for
+        params Claude left out (it shouldn't, given `required` in the tool
+        schema, but a model can still be sloppy)."""
+        if intent_type == IntentType.MOVE_LESSON:
+            missing = []
+            if not params.get("subject"):
+                missing.append("Which subject?")
+            if not params.get("class"):
+                missing.append("Which class?")
+            if not params.get("from_day"):
+                missing.append("Which day to move from?")
+            if not params.get("to_day"):
+                missing.append("Which day to move to?")
+            return missing
+        if intent_type == IntentType.REDUCE_WORKLOAD:
+            missing = []
+            if not params.get("teacher"):
+                missing.append("Which teacher?")
+            if params.get("max_hours") is None:
+                missing.append("How many hours max?")
+            return missing
+        if intent_type == IntentType.EXCLUDE_DAY:
+            missing = []
+            if not params.get("teacher"):
+                missing.append("Which teacher?")
+            if not params.get("day"):
+                missing.append("Which day?")
+            return missing
+        if intent_type == IntentType.SET_SOFT_CONSTRAINT:
+            return ["How many hours?"] if params.get("max_hours") is None else []
+        return []
+
     def _parse_with_llm(self, message: str, context: Optional[Dict[str, Any]] = None) -> ParsedIntent:
-        """Parse using Claude API with function calling."""
-        # TODO: Implement LLM function calling
-        # Use self.client.messages.create with tools parameter
-        # Define JSON schema for each intent type
-        logger.info("LLM parsing not yet implemented")
-        return self._parse_with_patterns(message, context)
+        """
+        Parse using Claude's tool use (function calling): ask the model to
+        call at most one of the 4 intent tools, with only the parameters it
+        actually found in the message.
+        """
+        system = (
+            "Sei l'assistente che interpreta le richieste in linguaggio naturale "
+            "dell'amministratore scolastico per modificare l'orario settimanale. "
+            "Chiama uno dei tool disponibili con i parametri estratti dal messaggio, "
+            "usando SOLO valori realmente presenti nel messaggio: non inventare nomi "
+            "di materie, classi, docenti o giorni che non sono stati citati. Se la "
+            "richiesta non corrisponde a nessuno dei tool disponibili, non chiamare "
+            "nessun tool."
+        )
+        if context:
+            system += "\n\nContesto disponibile:\n" + json.dumps(context, ensure_ascii=False)
+
+        response = self.client.messages.create(
+            model=self._LLM_MODEL,
+            max_tokens=512,
+            system=system,
+            tools=self._llm_tools(),
+            messages=[{"role": "user", "content": message}],
+        )
+
+        tool_use = next((block for block in response.content if block.type == "tool_use"), None)
+
+        if not tool_use:
+            text = "".join(b.text for b in response.content if getattr(b, "type", None) == "text")
+            return ParsedIntent(
+                intent=IntentType.UNKNOWN,
+                parameters={},
+                confidence=0.0,
+                clarifications_needed=[
+                    text or "Could you rephrase? I understand: move lesson, reduce workload, "
+                    "exclude day, or set constraints."
+                ],
+                raw_response=text or None,
+            )
+
+        intent_type = IntentType(tool_use.name)
+        params = dict(tool_use.input)
+        clarifications = self._missing_required_params(intent_type, params)
+
+        return ParsedIntent(
+            intent=intent_type,
+            parameters=params,
+            confidence=0.5 if clarifications else 0.95,
+            clarifications_needed=clarifications,
+            raw_response=json.dumps(params, ensure_ascii=False),
+        )
 
     def _parse_with_patterns(self, message: str, context: Optional[Dict[str, Any]] = None) -> ParsedIntent:
         """

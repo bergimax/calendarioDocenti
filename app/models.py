@@ -36,6 +36,12 @@ class Classe(Base):
     scuola_id = Column(String, ForeignKey("scuola.id"), nullable=False)
     nome = Column(String(50), nullable=False)  # e.g., "1A", "2B"
     n_studenti = Column(Integer, default=0)
+    # Year-group/cohort label (e.g. "PRIME", "SECONDE") used to match this
+    # classe against per-group calendar rows extracted from a PDF calendar
+    # (see CalendarioAnnuale.gruppo). Optional: a school using only the plain
+    # CSV calendar (one ore_max_giornata per day for the whole school) never
+    # needs this.
+    gruppo = Column(String(50), nullable=True)
     created_at = Column(DateTime, server_default=func.now())
 
     # Relationships
@@ -111,6 +117,11 @@ class CalendarioAnnuale(Base):
     id = Column(String, primary_key=True, default=lambda: str(__import__('uuid').uuid4()))
     scuola_id = Column(String, ForeignKey("scuola.id"), nullable=False)
     data = Column(Date, nullable=False)
+    # NULL = applies to every classe in the school (the plain single-value-
+    # per-day calendar, e.g. from CSV, or a school-wide closure). A non-NULL
+    # value restricts this row to classi whose Classe.gruppo matches (used
+    # when a PDF calendar has different daily hours per year-group).
+    gruppo = Column(String(50), nullable=True)
     ore_max_giornata = Column(Integer, default=6)  # 4, 5, or 6
     flag_chiusura = Column(Boolean, default=False)
     flag_stage_classe_id = Column(String, ForeignKey("classe.id"), nullable=True)

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy.orm import Session
 from datetime import date
 from typing import Dict, Any
@@ -40,6 +40,30 @@ def generate_schedule(
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
+@router.post("/schedule/{week_start}/regenerate")
+def regenerate_schedule(
+    week_start: date,
+    db: Session = Depends(get_db),
+) -> ScheduleGenerateResponse:
+    """
+    Regenerate schedule for week from scratch (replaces the week's slots
+    in place; same underlying flow as /schedule/generate).
+    """
+    scuola_id = _get_current_school_id()
+
+    try:
+        service = ScheduleService(db)
+        return service.generate_schedule(
+            scuola_id=scuola_id,
+            week_start=week_start,
+            timeout_seconds=60,
+        )
+
+    except Exception as e:
+        logger.error(f"Error regenerating schedule: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
 @router.get("/schedule/{week_start}")
 def get_schedule(
     week_start: date,
@@ -56,8 +80,14 @@ def get_schedule(
             scuola_id=scuola_id,
             week_start=week_start,
         )
+
+        if result is None:
+            raise HTTPException(status_code=404, detail="No schedule found for this week")
+
         return result
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error retrieving schedule: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -71,13 +101,22 @@ def get_quality_score(
     """
     Get quality score details for schedule.
     """
-    # TODO: Implement quality score logic
+    scuola_id = _get_current_school_id()
 
-    return {
-        "quality_score": 73,
-        "quality_level": "B",
-        "details": {},
-    }
+    try:
+        service = ScheduleService(db)
+        result = service.get_quality_score(scuola_id=scuola_id, week_start=week_start)
+
+        if result is None:
+            raise HTTPException(status_code=404, detail="No schedule found for this week")
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting quality score: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/schedule/{week_start}/modify-slot")
@@ -87,18 +126,21 @@ def modify_slot(
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
     """
-    Modify single schedule slot and recalculate with warm start.
+    Modify single schedule slot and recalculate quality score.
     """
-    try:
-        # TODO: Implement modify and recalculate logic
+    scuola_id = _get_current_school_id()
 
-        return {
-            "status": "modified",
-            "new_score": 78,
-            "slots": [],
-        }
+    try:
+        service = ScheduleService(db)
+        return service.modify_slot(
+            scuola_id=scuola_id,
+            week_start=week_start,
+            slot_id=request.slot_id,
+            changes=request.changes,
+        )
 
     except Exception as e:
+        logger.error(f"Error modifying slot: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -111,16 +153,20 @@ def apply_quick_action(
     """
     Apply quick action (deroga) and recalculate.
     """
-    try:
-        # TODO: Implement quick action logic
+    scuola_id = _get_current_school_id()
 
-        return {
-            "status": "applied",
-            "new_score": 68,
-            "slots": [],
-        }
+    try:
+        service = ScheduleService(db)
+        return service.apply_quick_action(
+            scuola_id=scuola_id,
+            week_start=week_start,
+            action_type=request.action_type,
+            class_id=request.class_id,
+            teacher_id=request.teacher_id,
+        )
 
     except Exception as e:
+        logger.error(f"Error applying quick action: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -169,3 +215,33 @@ def export_pdf(
     except Exception as e:
         logger.error(f"Error exporting PDF: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/schedule/{week_start}/export-pdf/file")
+def download_pdf(
+    week_start: date,
+    db: Session = Depends(get_db),
+) -> Response:
+    """
+    Stream the actual PDF tabellone bytes (the URL returned by export-pdf).
+    """
+    scuola_id = _get_current_school_id()
+
+    try:
+        service = ScheduleService(db)
+        pdf_bytes = service.render_pdf(scuola_id=scuola_id, week_start=week_start)
+
+        if pdf_bytes is None:
+            raise HTTPException(status_code=404, detail="No schedule found for this week")
+
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'inline; filename="orario_{week_start}.pdf"'},
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error rendering PDF: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")

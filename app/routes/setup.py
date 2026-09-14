@@ -9,6 +9,7 @@ from app.schemas import (
     SetupValidationResponse,
     FieldValidationRequest,
     FieldValidationResponse,
+    CorrectionRequest,
     SetupSaveRequest,
     SetupSaveResponse,
 )
@@ -41,45 +42,118 @@ def _get_setup_service(db: Session) -> SetupService:
     return _setup_service
 
 
-@router.post("/calendar/upload")
-async def upload_calendar(file: UploadFile = File(...)) -> FileUploadResponse:
+async def _upload_and_ingest(
+    file_type: str,
+    id_prefix: str,
+    allowed_extensions: tuple,
+    file: UploadFile,
+    db: Session,
+) -> FileUploadResponse:
     """
-    Upload calendar CSV file.
-    Returns file_id for later processing.
+    Shared logic for every /api/*/upload endpoint: read the file, parse it
+    via SetupService.ingest_file (caching the result for the setup wizard so
+    a later POST /api/setup/validate doesn't need to repeat this field in its
+    JSON body - the frontend only sends back the file_ids), and wrap the
+    result as a FileUploadResponse.
     """
-    if not file.filename.endswith(".csv"):
-        raise HTTPException(status_code=400, detail="Only CSV files allowed for calendar")
+    filename = file.filename or ""
+    if not filename.lower().endswith(allowed_extensions):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{file_type} file must be one of: {', '.join(allowed_extensions)}",
+        )
 
-    # Read file content
     content = await file.read()
-    csv_content = content.decode("utf-8")
 
-    file_id = f"cal_{__import__('uuid').uuid4()}"
+    try:
+        service = _get_setup_service(db)
+        result = service.ingest_file(file_type, filename, content)
+    except ValueError as e:
+        logger.warning(f"{file_type} upload validation error: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"{file_type} upload parse error: {e}")
+        raise HTTPException(status_code=400, detail=f"Could not parse {file_type} file: {e}")
 
-    logger.info(f"Calendar file uploaded: {file_id}")
+    file_id = f"{id_prefix}_{__import__('uuid').uuid4()}"
+    logger.info(f"{file_type} file uploaded: {file_id} ({result['file_type']})")
 
     return FileUploadResponse(
         status="uploaded",
         file_id=file_id,
-        file_type="calendario",
-        preview={"bytes": len(csv_content)},
+        file_type=file_type,
+        preview=result["preview"],
     )
+
+
+@router.post("/calendar/upload")
+async def upload_calendar(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+) -> FileUploadResponse:
+    """Upload the annual calendar as CSV or PDF (specs.md 3.1)."""
+    return await _upload_and_ingest("calendario", "cal", (".csv", ".pdf"), file, db)
+
+
+@router.post("/teachers/upload")
+async def upload_teachers(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+) -> FileUploadResponse:
+    """Upload the docenti CSV."""
+    return await _upload_and_ingest("docenti", "doc", (".csv",), file, db)
+
+
+@router.post("/classes/upload")
+async def upload_classes(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+) -> FileUploadResponse:
+    """Upload the classi CSV."""
+    return await _upload_and_ingest("classi", "cls", (".csv",), file, db)
+
+
+@router.post("/subjects/upload")
+async def upload_subjects(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+) -> FileUploadResponse:
+    """Upload the materie CSV."""
+    return await _upload_and_ingest("materie", "mat", (".csv",), file, db)
+
+
+@router.post("/assignments/upload")
+async def upload_assignments(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+) -> FileUploadResponse:
+    """Upload the assegnazioni CSV."""
+    return await _upload_and_ingest("assegnazioni", "asg", (".csv",), file, db)
+
+
+@router.post("/class-pairings/upload")
+async def upload_class_pairings(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+) -> FileUploadResponse:
+    """Upload the accoppiamenti CSV (optional)."""
+    return await _upload_and_ingest("accoppiamenti", "acc", (".csv",), file, db)
 
 
 @router.post("/setup/validate")
 def validate_setup(
-    file_data: Dict[str, str],
+    file_data: Dict[str, Any],
     db: Session = Depends(get_db),
 ) -> SetupValidationResponse:
     """
-    Validate all setup files.
-    Parses CSV content and checks coherence.
+    Validate all setup files and check coherence.
 
-    Request body: {
-        "calendario": "csv content",
-        "docenti": "csv content",
-        ...
-    }
+    Preferred: each file was already uploaded via its own /api/*/upload
+    endpoint, and this call just carries `{"file_ids": [...]}` (the ids
+    themselves aren't inspected - the already-parsed data lives server-side
+    by the time this runs). Also accepts raw CSV text directly per field
+    (`{"docenti": "csv content", ...}`) for API-only usage without a prior
+    upload.
     """
     try:
         service = _get_setup_service(db)
@@ -114,6 +188,71 @@ def validate_single_field(
 
     except Exception as e:
         logger.error(f"Field validation error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/setup/apply-correction")
+def apply_correction(
+    request: CorrectionRequest,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """
+    Commit a field correction confirmed in the setup wizard's
+    CorrectionForm ("Salva correzione"). `request.correction` carries
+    {field, entity, new_value} - `file_type` isn't sent by the frontend,
+    it's resolved from `file_id`'s own prefix (see SetupService.apply_correction).
+    """
+    correction = request.correction or {}
+
+    try:
+        service = _get_setup_service(db)
+        return service.apply_correction(
+            file_id=request.file_id,
+            entity_identifier=correction.get("entity"),
+            field=correction.get("field"),
+            new_value=correction.get("new_value"),
+        )
+
+    except ValueError as e:
+        logger.warning(f"Correction error: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Unexpected error applying correction: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/calendar/add-date-manual")
+def add_calendar_date_manual(
+    payload: Dict[str, Any],
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """
+    Manually add one calendar date - the fallback for a date the OCR/PDF
+    calendar parser missed (specs.md 3.1). Request:
+    {file_id, date, ore_max_giornata, flag_chiusura, flag_stage_classe_id}.
+    """
+    try:
+        try:
+            parsed_date = date.fromisoformat(str(payload["date"]))
+        except (KeyError, TypeError, ValueError):
+            raise HTTPException(status_code=400, detail=f"Invalid or missing date: {payload.get('date')!r}")
+
+        service = _get_setup_service(db)
+        total = service.add_calendar_date_manual(
+            data=parsed_date,
+            ore_max_giornata=payload["ore_max_giornata"],
+            flag_chiusura=payload.get("flag_chiusura", False),
+            flag_stage_classe_id=payload.get("flag_stage_classe_id"),
+        )
+        return {"status": "added", "total_dates_loaded": total}
+
+    except HTTPException:
+        raise
+    except (KeyError, ValueError) as e:
+        logger.warning(f"Manual calendar date error: {e}")
+        raise HTTPException(status_code=400, detail=str(e) or "Missing required field")
+    except Exception as e:
+        logger.error(f"Unexpected error adding manual calendar date: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 

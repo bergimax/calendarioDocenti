@@ -28,14 +28,91 @@ class SetupService:
         # Cache parsed data during setup flow (session-scoped)
         self.parsed_data_cache: Dict[str, Any] = {}
 
+    @staticmethod
+    def _calendario_preview(parsed: List[Dict[str, Any]]) -> Dict[str, Any]:
+        gruppi = sorted({p["gruppo"] for p in parsed if p.get("gruppo")})
+        return {
+            "count": len(parsed),
+            "date_range": (
+                f"{min(p['data'] for p in parsed)} to {max(p['data'] for p in parsed)}"
+                if parsed else "N/A"
+            ),
+            "closures": sum(1 for p in parsed if p.get("flag_chiusura")),
+            "gruppi": gruppi,
+        }
+
+    @staticmethod
+    def _preview_for(file_type: str, parsed: List[Dict[str, Any]]) -> Dict[str, Any]:
+        if file_type == "calendario":
+            return SetupService._calendario_preview(parsed)
+        if file_type == "docenti":
+            return {
+                "count": len(parsed),
+                "assunti": sum(1 for p in parsed if p["tipo"] == "ASSUNTO"),
+                "contratti": sum(1 for p in parsed if p["tipo"] == "CONTRATTO"),
+            }
+        return {"count": len(parsed)}
+
+    def ingest_file(self, file_type: str, filename: str, content: bytes) -> Dict[str, Any]:
+        """
+        Parse an uploaded setup file (one of calendario/docenti/classi/materie/
+        assegnazioni/accoppiamenti) ahead of the main /api/setup/validate call,
+        and cache the result under file_type so parse_and_validate_files()
+        picks it up automatically without needing that field in its JSON body
+        (the frontend instead sends the file_ids it got back from each upload;
+        since this service instance is a single-flow-at-a-time singleton -
+        see routes/setup.py - the cache alone is enough to resolve them).
+
+        calendario is the only file type that accepts PDF as well as CSV
+        (specs.md 3.1); everything else is CSV-only for now.
+        """
+        lower_name = filename.lower()
+
+        if file_type == "calendario" and lower_name.endswith(".pdf"):
+            parsed = CalendarParser.parse_calendario_pdf(content)
+            content_type = "pdf"
+        elif lower_name.endswith(".csv"):
+            parser_func = {
+                "calendario": CalendarParser.parse_calendar_csv,
+                "docenti": CalendarParser.parse_docenti_csv,
+                "classi": CalendarParser.parse_classi_csv,
+                "materie": CalendarParser.parse_materie_csv,
+                "assegnazioni": CalendarParser.parse_assegnazioni_csv,
+                "accoppiamenti": CalendarParser.parse_accoppiamenti_csv,
+            }.get(file_type)
+            if parser_func is None:
+                raise ValueError(f"Unknown file type: {file_type}")
+            parsed = parser_func(content.decode("utf-8"))
+            content_type = "csv"
+        elif file_type == "calendario":
+            raise ValueError("Calendar file must be .csv or .pdf")
+        else:
+            raise ValueError(f"{file_type} file must be .csv")
+
+        self.parsed_data_cache[file_type] = parsed
+
+        logger.info(f"Ingested {file_type} {content_type} '{filename}': {len(parsed)} entries")
+
+        return {
+            "file_type": content_type,
+            "preview": self._preview_for(file_type, parsed),
+        }
+
     def parse_and_validate_files(
         self,
-        file_data: Dict[str, Optional[str]],
+        file_data: Dict[str, Any],
     ) -> SetupValidationResponse:
         """
         Parse all uploaded files and validate coherence.
 
-        file_data format: {
+        Preferred flow (matches the frontend): each file is uploaded first via
+        its own /api/*/upload endpoint (ingest_file()), and this call's body
+        just carries file_data={"file_ids": [...]} - the ids themselves are
+        not even inspected, since the already-parsed data lives in
+        self.parsed_data_cache by the time this runs.
+
+        Also supported directly (e.g. calling the API without uploading
+        first): file_data = {
             "calendario": "csv content",
             "docenti": "csv content",
             "classi": "csv content",
@@ -62,7 +139,25 @@ class SetupService:
         }
 
         for file_type, (parser_func, display_name) in file_parsers.items():
+            # A file may already have been parsed via its own /api/*/upload
+            # endpoint (ingest_file()) ahead of this call - the frontend
+            # sends file_ids rather than repeating raw CSV content here, and
+            # since SetupService is a single-flow-at-a-time singleton (see
+            # routes/setup.py) the cache alone is enough to resolve them, no
+            # need to actually look the ids up. Fall back to this call's own
+            # JSON body (raw CSV text) for direct/API-only usage.
+            already_parsed = self.parsed_data_cache.get(file_type)
             csv_content = file_data.get(file_type)
+
+            if already_parsed is not None:
+                parsed_data[file_type] = already_parsed
+                results[file_type] = FileValidationResult(
+                    success=True,
+                    preview=self._preview_for(file_type, already_parsed),
+                    warnings=[],
+                    errors=[],
+                )
+                continue
 
             if not csv_content:
                 # Optional file (accoppiamenti)
@@ -90,25 +185,9 @@ class SetupService:
                 parsed = parser_func(csv_content)
                 parsed_data[file_type] = parsed
 
-                # Build preview
-                if file_type == "calendario":
-                    preview = {
-                        "count": len(parsed),
-                        "date_range": f"{min(p['data'] for p in parsed)} to {max(p['data'] for p in parsed)}" if parsed else "N/A",
-                        "closures": sum(1 for p in parsed if p.get("flag_chiusura"))
-                    }
-                elif file_type == "docenti":
-                    preview = {
-                        "count": len(parsed),
-                        "assunti": sum(1 for p in parsed if p["tipo"] == "ASSUNTO"),
-                        "contratti": sum(1 for p in parsed if p["tipo"] == "CONTRATTO"),
-                    }
-                else:
-                    preview = {"count": len(parsed)}
-
                 results[file_type] = FileValidationResult(
                     success=True,
-                    preview=preview,
+                    preview=self._preview_for(file_type, parsed),
                     warnings=[],
                     errors=[],
                 )
@@ -257,6 +336,92 @@ class SetupService:
                 valid=False,
                 message=f"Validation error: {str(e)}",
             )
+
+    _FILE_TYPE_BY_ID_PREFIX = {
+        "cal": "calendario", "doc": "docenti", "cls": "classi",
+        "mat": "materie", "asg": "assegnazioni", "acc": "accoppiamenti",
+    }
+
+    def apply_correction(
+        self, file_id: str, entity_identifier: str, field: str, new_value: str,
+    ) -> Dict[str, Any]:
+        """
+        Commit a correction confirmed in the setup wizard's CorrectionForm
+        ("Salva correzione"). validate_field_correction() above already
+        gives real-time feedback as the admin types, but this is the
+        actual write - independent of whether that preview call ran, and
+        it rolls back the change if it turns out invalid (validate_field_
+        correction leaves an invalid in-place edit sitting in the cache).
+
+        The request only carries file_id, not file_type - resolved from
+        the id's own prefix, the same scheme ingest_file's callers use
+        ("doc_<uuid>", "cls_<uuid>", ...).
+        """
+        prefix = (file_id or "").split("_", 1)[0]
+        file_type = self._FILE_TYPE_BY_ID_PREFIX.get(prefix)
+        if not file_type:
+            raise ValueError(f"Unrecognized file_id: {file_id!r}")
+
+        parsed_data = self.parsed_data_cache.get(file_type)
+        if not parsed_data:
+            raise ValueError(f"No cached data for {file_type}")
+
+        entity = next((e for e in parsed_data if e.get("nome") == entity_identifier), None)
+        if entity is None:
+            raise ValueError(f"Entity {entity_identifier!r} not found in {file_type}")
+
+        validator = {
+            "docenti": DataValidator.validate_docente,
+            "classi": DataValidator.validate_classe,
+            "materie": DataValidator.validate_materia,
+        }.get(file_type)
+        if validator is None:
+            raise ValueError(f"Corrections aren't supported for {file_type}")
+
+        original_value = entity.get(field)
+        entity[field] = new_value
+        valid, error = validator(entity)
+        if not valid:
+            entity[field] = original_value
+            raise ValueError(error)
+
+        logger.info(f"Applied correction: {file_type}/{entity_identifier}.{field} = {new_value!r}")
+        return {
+            "status": "applied", "file_type": file_type,
+            "entity": entity_identifier, "field": field, "new_value": new_value,
+        }
+
+    def add_calendar_date_manual(
+        self,
+        data: date,
+        ore_max_giornata: int,
+        flag_chiusura: bool = False,
+        flag_stage_classe_id: Optional[str] = None,
+    ) -> int:
+        """
+        Manually add one calendario entry - the fallback for a date the
+        OCR/PDF calendar parser missed (specs.md 3.1, ManualCalendar in
+        the setup wizard). Replaces any existing staged entry for the same
+        date rather than duplicating it. Returns the new total count of
+        staged calendario entries (frontend shows it as confirmation).
+        """
+        if ore_max_giornata not in (4, 5, 6):
+            raise ValueError(f"ore_max_giornata must be 4, 5, or 6, got {ore_max_giornata}")
+
+        calendario = self.parsed_data_cache.setdefault("calendario", [])
+
+        calendario[:] = [c for c in calendario if c.get("data") != data]
+        calendario.append({
+            "data": data,
+            "gruppo": None,
+            "ore_max_giornata": ore_max_giornata,
+            "flag_chiusura": flag_chiusura,
+            "stage_classe_id": flag_stage_classe_id,
+        })
+        calendario.sort(key=lambda c: c["data"])
+
+        logger.info(f"Manually added calendar date {data}: {len(calendario)} entries staged")
+        return len(calendario)
 
     def apply_and_save_setup(
         self,
