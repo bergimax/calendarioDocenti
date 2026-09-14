@@ -185,17 +185,35 @@ class ScheduleRepository:
         logger.info(f"Saving schedule: {len(slots)} slots, score {quality_score:.1f}")
 
         try:
-            # Create OrarioSettimanale record
-            orario = OrarioSettimanale(
-                scuola_id=scuola_id,
-                settimana_inizio=week_start,
-                stato="BOZZA",
-                quality_score=quality_score,
-                quality_level=quality_level,
-                n_conflitti_soft=n_soft_conflicts,
-            )
-            self.db.add(orario)
-            self.db.flush()  # Get orario.id
+            # Regenerating a week that already has a schedule replaces its
+            # slots in place (same id) instead of inserting a second
+            # OrarioSettimanale row for the same scuola_id/week_start, which
+            # would make get_schedule_by_week's lookup pick an arbitrary one.
+            orario = self.db.query(OrarioSettimanale).filter(
+                OrarioSettimanale.scuola_id == scuola_id,
+                OrarioSettimanale.settimana_inizio == week_start,
+            ).first()
+
+            if orario:
+                self.db.query(SlotLezione).filter(
+                    SlotLezione.orario_settimanale_id == orario.id
+                ).delete(synchronize_session=False)
+                orario.stato = "BOZZA"
+                orario.quality_score = quality_score
+                orario.quality_level = quality_level
+                orario.n_conflitti_soft = n_soft_conflicts
+                orario.approved_at = None
+            else:
+                orario = OrarioSettimanale(
+                    scuola_id=scuola_id,
+                    settimana_inizio=week_start,
+                    stato="BOZZA",
+                    quality_score=quality_score,
+                    quality_level=quality_level,
+                    n_conflitti_soft=n_soft_conflicts,
+                )
+                self.db.add(orario)
+                self.db.flush()  # Get orario.id
 
             # Bulk insert SlotLezione records
             for slot in slots:

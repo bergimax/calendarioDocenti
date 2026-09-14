@@ -37,6 +37,18 @@ class ScheduleService:
         logger.info(f"Generating schedule for school {scuola_id} week {week_start}")
 
         try:
+            from app.models import OrarioSettimanale
+
+            existing = self.db.query(OrarioSettimanale).filter(
+                OrarioSettimanale.scuola_id == scuola_id,
+                OrarioSettimanale.settimana_inizio == week_start,
+            ).first()
+            if existing and existing.stato == "APPROVATO":
+                return ScheduleGenerateResponse(
+                    status="error",
+                    message="Schedule is approved and locked; cannot regenerate.",
+                )
+
             # 1. Extract context from DB
             context = self.repo.get_week_context(scuola_id, week_start)
 
@@ -132,32 +144,23 @@ class ScheduleService:
                 message=f"Internal error: {str(e)}",
             )
 
-    def get_schedule(self, scuola_id: str, week_start: date) -> Dict[str, Any]:
+    def get_schedule(self, scuola_id: str, week_start: date) -> Optional[Dict[str, Any]]:
         """
-        Retrieve previously generated schedule.
+        Retrieve previously generated schedule. Returns None if no schedule
+        exists for this week (the route maps that to 404).
+
+        The response is the schedule's fields flattened at the top level
+        (schedule_id, quality_score, slots, ...) - not nested under a
+        "schedule" key - because the frontend fetches this directly as its
+        `Schedule` type (frontend/src/lib/types.ts).
         """
         logger.info(f"Retrieving schedule for school {scuola_id} week {week_start}")
 
-        try:
-            schedule = self.repo.get_schedule_by_week(scuola_id, week_start)
+        schedule = self.repo.get_schedule_by_week(scuola_id, week_start)
+        if not schedule:
+            return None
 
-            if not schedule:
-                return {
-                    "status": "not_found",
-                    "message": "No schedule found for this week",
-                }
-
-            return {
-                "status": "found",
-                "schedule": schedule,
-            }
-
-        except Exception as e:
-            logger.error(f"Error retrieving schedule: {e}")
-            return {
-                "status": "error",
-                "message": str(e),
-            }
+        return {"status": "found", **schedule}
 
     # ===== Helper Methods =====
 

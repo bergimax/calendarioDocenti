@@ -40,6 +40,30 @@ def generate_schedule(
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
+@router.post("/schedule/{week_start}/regenerate")
+def regenerate_schedule(
+    week_start: date,
+    db: Session = Depends(get_db),
+) -> ScheduleGenerateResponse:
+    """
+    Regenerate schedule for week from scratch (replaces the week's slots
+    in place; same underlying flow as /schedule/generate).
+    """
+    scuola_id = _get_current_school_id()
+
+    try:
+        service = ScheduleService(db)
+        return service.generate_schedule(
+            scuola_id=scuola_id,
+            week_start=week_start,
+            timeout_seconds=60,
+        )
+
+    except Exception as e:
+        logger.error(f"Error regenerating schedule: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
 @router.get("/schedule/{week_start}")
 def get_schedule(
     week_start: date,
@@ -56,8 +80,14 @@ def get_schedule(
             scuola_id=scuola_id,
             week_start=week_start,
         )
+
+        if result is None:
+            raise HTTPException(status_code=404, detail="No schedule found for this week")
+
         return result
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error retrieving schedule: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")

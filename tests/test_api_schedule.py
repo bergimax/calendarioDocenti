@@ -6,7 +6,7 @@ def _generated_slots(client, week):
     slot_id values (unlike the generate response, which leaves slot_id="")."""
     gen = client.post("/api/schedule/generate", json={"week_start": week}).json()
     assert gen["status"] == "generated", gen
-    return client.get(f"/api/schedule/{week}").json()["schedule"]["slots"]
+    return client.get(f"/api/schedule/{week}").json()["slots"]
 
 
 def test_generate_schedule_accepts_json_body(client, school_setup):
@@ -56,18 +56,59 @@ def test_generated_schedule_pairs_shared_teacher(client, school_setup):
 
 
 def test_get_schedule_after_generation(client, school_setup):
+    """
+    Regression test: the response used to nest everything under a
+    "schedule" key ({"status": "found", "schedule": {...}}), but the
+    frontend fetches this endpoint expecting its `Schedule` type's fields
+    (quality_score, slots, ...) at the top level.
+    """
     week = school_setup["week_start"]
     client.post("/api/schedule/generate", json={"week_start": week})
 
     r = client.get(f"/api/schedule/{week}")
     assert r.status_code == 200
-    assert r.json()["status"] == "found"
+    body = r.json()
+    assert body["status"] == "found"
+    assert "quality_score" in body
+    assert "slots" in body
 
 
 def test_get_schedule_for_week_without_data(client, school_setup):
     r = client.get("/api/schedule/2099-01-05")
+    assert r.status_code == 404
+
+
+def test_regenerate_schedule_replaces_slots_in_place(client, school_setup):
+    """
+    Regression test: the frontend's "Genera da zero" button posts to
+    /schedule/{week}/regenerate, which didn't exist as a route before.
+    Regenerating an existing week must keep the same schedule_id rather
+    than creating a second OrarioSettimanale row for that week.
+    """
+    week = school_setup["week_start"]
+    first = client.post("/api/schedule/generate", json={"week_start": week}).json()
+    assert first["status"] == "generated"
+    schedule_id = first["schedule_id"]
+
+    r = client.post(f"/api/schedule/{week}/regenerate")
     assert r.status_code == 200
-    assert r.json()["status"] == "not_found"
+    body = r.json()
+    assert body["status"] == "generated"
+    assert body["schedule_id"] == schedule_id
+
+    fetched = client.get(f"/api/schedule/{week}").json()
+    assert fetched["schedule_id"] == schedule_id
+
+
+def test_regenerate_locked_after_approval(client, school_setup):
+    week = school_setup["week_start"]
+    client.post("/api/schedule/generate", json={"week_start": week})
+    client.post(f"/api/schedule/{week}/approve")
+
+    r = client.post(f"/api/schedule/{week}/regenerate")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "error"
 
 
 def test_quality_score_endpoint(client, school_setup):
