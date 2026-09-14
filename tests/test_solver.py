@@ -202,6 +202,54 @@ def test_monte_ore_limit_is_not_exceeded():
     assert len(slots) <= 3
 
 
+def test_pratica_hours_scattered_across_a_day_score_worse_than_a_block():
+    """
+    Soft constraint 2 (specs.md 4.1: PRATICA/laboratorio hours should form
+    blocchi da 3 a 6 ore). _soft_pratica_blocks used to be a no-op stub
+    that added no penalties at all, so a scattered pattern and a proper
+    block scored identically. Compare the same 3 total hours laid out as
+    three isolated single hours vs. one contiguous block: the block must
+    score strictly higher, and only the scattered layout should surface a
+    "pratica_block_gap" conflict.
+    """
+    assegnazioni = [
+        AssegnazioneDati("a1", "d1", "Prof Bianchi", "ASSUNTO", "c1", "1A", "m2", "Lab",
+                          "PRATICA", "MEDIO", ore_residue=20),
+    ]
+    ctx = _minimal_context(assegnazioni=assegnazioni, materie_map={"m2": "PRATICA"})
+
+    scattered = ScheduleSolver(ctx)
+    scattered.build_model()
+    assert scattered.solve_fixed({("a1", 0, 0), ("a1", 0, 2), ("a1", 0, 4)}) in ("OPTIMAL", "FEASIBLE")
+    scattered_score, _, _ = scattered.calculate_quality_score()
+
+    contiguous = ScheduleSolver(ctx)
+    contiguous.build_model()
+    assert contiguous.solve_fixed({("a1", 0, 0), ("a1", 0, 1), ("a1", 0, 2)}) in ("OPTIMAL", "FEASIBLE")
+    contiguous_score, _, _ = contiguous.calculate_quality_score()
+
+    assert contiguous_score > scattered_score
+    assert any(c["conflict_id"].startswith("pratica_block_gap") for c in scattered.get_conflicts())
+    assert not any(c["conflict_id"].startswith("pratica_block") for c in contiguous.get_conflicts())
+
+
+def test_pratica_short_isolated_hour_is_flagged_too_short():
+    """A single isolated practice hour (below the 3h minimum) must be
+    flagged, even though it has no internal gaps to catch."""
+    assegnazioni = [
+        AssegnazioneDati("a1", "d1", "Prof Bianchi", "ASSUNTO", "c1", "1A", "m2", "Lab",
+                          "PRATICA", "MEDIO", ore_residue=20),
+    ]
+    ctx = _minimal_context(assegnazioni=assegnazioni, materie_map={"m2": "PRATICA"})
+
+    solver = ScheduleSolver(ctx)
+    solver.build_model()
+    assert solver.solve_fixed({("a1", 0, 0)}) in ("OPTIMAL", "FEASIBLE")
+
+    conflicts = solver.get_conflicts()
+    assert any(c["conflict_id"].startswith("pratica_block_short") for c in conflicts)
+
+
 def test_soft_constraint_weights_are_applied_to_objective():
     """
     Regression test: build_model()'s objective used to be

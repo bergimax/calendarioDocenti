@@ -561,27 +561,76 @@ class ScheduleSolver:
                         ))
 
     def _soft_pratica_blocks(self) -> None:
-        """Soft: Practice should be in 3-6 hour blocks."""
-        weight = 8
+        """
+        Soft: PRATICA/laboratorio hours should form one 3-6 hour block per
+        day per assegnazione (specs.md 4.1: "blocchi da 3 a 6 ore, adattati
+        alla capienza massima del giorno se la giornata è corta"), not
+        scattered single hours through the week.
 
-        # This is complex: we want continuous blocks of 3-6 hours for same (classe, docente, materia)
-        # For MVP, simplify: minimize isolated practice hours (alone without before/after)
+        Two complementary penalties approximate "one contiguous block in
+        [3,6]" without a full interval-scheduling formulation:
+        1. the day's total hours for this assegnazione, if any are
+           scheduled that day at all, penalized for falling below
+           min(3, day_cap) - day_cap adapts the target down on a short
+           day. There's no symmetric "too long" check: this assegnazione's
+           hours that day are already a subset of the classe's daily
+           total, which _constraint_day_capacity hard-caps at day_cap
+           (<=6, the whole 08:00-14:00 window), so a block exceeding 6h
+           can't occur in the first place;
+        2. a "hole": an hour with practice both immediately before and
+           after it but not itself scheduled - same gap-detection idiom as
+           _soft_contractor_gaps - penalizes scattering the day's hours
+           into disconnected pieces even when the total is already within
+           range.
+        """
+        weight = 8
 
         pratica_asgs = [asg for asg in self.context.assegnazioni if asg.materia_tipo == "PRATICA"]
 
-        for giorno in range(5):
-            for ora in range(6):
-                for asg in pratica_asgs:
-                    key = (asg.assegnazione_id, giorno, ora)
-                    if key not in self.x:
-                        continue
+        for asg in pratica_asgs:
+            for giorno in range(5):
+                hours = [
+                    self.x[(asg.assegnazione_id, giorno, ora)]
+                    for ora in range(6)
+                    if (asg.assegnazione_id, giorno, ora) in self.x
+                ]
+                if not hours:
+                    continue
 
-                    # Check if this slot is isolated (no adjacent slots same asg)
-                    has_before = (asg.assegnazione_id, giorno, ora - 1) in self.x and ora > 0
-                    has_after = (asg.assegnazione_id, giorno, ora + 1) in self.x and ora < 5
+                day_cap = self._ore_max_for_classe_giorno(asg.classe_id, giorno)
+                low = min(3, day_cap)
+                ore_in_day = sum(hours)
+                giorno_nome = GIORNI_NOMI_IT[GiornoEnum(giorno).name]
 
-                    # Isolated slot gets small penalty (can coexist with other asgs)
-                    # For now, skip complex logic
+                # Too-short block, only counted on a day this assegnazione
+                # actually has practice hours at all (a day with none
+                # isn't "a block", so it isn't penalized).
+                used = self.model.NewBoolVar(f"pratica_used_{asg.assegnazione_id}_{giorno}")
+                self.model.Add(ore_in_day >= 1).OnlyEnforceIf(used)
+                self.model.Add(ore_in_day == 0).OnlyEnforceIf(used.Not())
+
+                too_short = self.model.NewIntVar(0, 6, f"pratica_short_{asg.assegnazione_id}_{giorno}")
+                self.model.Add(too_short >= low - ore_in_day).OnlyEnforceIf(used)
+                self.model.Add(too_short == 0).OnlyEnforceIf(used.Not())
+                self.soft_penalties.append(SoftPenalty(
+                    var=too_short, weight=weight, kind="pratica_block_short",
+                    description=f"Blocco pratica troppo corto per {asg.classe_nome}/{asg.materia_nome} ({giorno_nome})",
+                    classe_id=asg.classe_id, giorno=giorno,
+                ))
+
+                # Holes inside an otherwise-active span.
+                for ora in range(1, 5):
+                    before = (asg.assegnazione_id, giorno, ora - 1)
+                    here = (asg.assegnazione_id, giorno, ora)
+                    after = (asg.assegnazione_id, giorno, ora + 1)
+                    if before in self.x and here in self.x and after in self.x:
+                        hole = self.model.NewIntVar(0, 1, f"pratica_hole_{asg.assegnazione_id}_{giorno}_{ora}")
+                        self.model.Add(hole >= self.x[before] + self.x[after] - 1 - self.x[here])
+                        self.soft_penalties.append(SoftPenalty(
+                            var=hole, weight=weight, kind="pratica_block_gap",
+                            description=f"Ore di pratica non contigue per {asg.classe_nome}/{asg.materia_nome} ({giorno_nome})",
+                            classe_id=asg.classe_id, giorno=giorno,
+                        ))
 
     def _soft_ore_target_deviation(self) -> None:
         """Soft: Minimize deviation from target hours per assegnazione (weight 15)."""
