@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from datetime import date
-from typing import Dict, Any
+from typing import Dict, Any, List
 from app.database import get_db
 from app.services.availability import AvailabilityService
 from app.schemas import AvailabilityResponse, AvailabilitySaveRequest
@@ -17,6 +17,37 @@ def _get_current_school_id() -> str:
     For now, return dummy value.
     """
     return "sch_1"
+
+
+@router.get("/teachers")
+def list_teachers(db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
+    """Active teachers for the current scuola, for the availability page's teacher grid."""
+    scuola_id = _get_current_school_id()
+
+    try:
+        service = AvailabilityService(db)
+        return service.list_teachers(scuola_id)
+
+    except Exception as e:
+        logger.error(f"Error listing teachers: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.get("/availability/weeks")
+def list_weeks(db: Session = Depends(get_db)) -> Dict[str, Any]:
+    """
+    Every school week (Monday-starting) for the current scuola, for the
+    week selector on the availability and orario pages.
+    """
+    scuola_id = _get_current_school_id()
+
+    try:
+        service = AvailabilityService(db)
+        return {"weeks": service.list_weeks(scuola_id)}
+
+    except Exception as e:
+        logger.error(f"Error listing weeks: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/availability/{week_start}/status")

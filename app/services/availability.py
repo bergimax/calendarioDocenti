@@ -198,6 +198,42 @@ class AvailabilityService:
             "completion_percentage": (filled_teachers / total_teachers * 100) if total_teachers > 0 else 0,
         }
 
+    def list_teachers(self, scuola_id: str) -> List[Dict[str, Any]]:
+        """Active teachers for this scuola, for the availability page's teacher grid."""
+        docenti = self.db.query(Docente).filter_by(scuola_id=scuola_id, active=True).order_by(Docente.nome).all()
+        return [
+            {"teacher_id": d.id, "nome": d.nome, "email": d.email or "", "tipo": d.tipo}
+            for d in docenti
+        ]
+
+    def list_weeks(self, scuola_id: str) -> List[Dict[str, Any]]:
+        """
+        Every Monday-starting school week within this scuola's anno
+        formativo (data_inizio_anno..data_fine_anno), for the week
+        selector on the availability and orario pages.
+        """
+        from app.models import Scuola
+
+        scuola = self.db.query(Scuola).filter_by(id=scuola_id).first()
+        if not scuola:
+            return []
+
+        # First Monday on/after data_inizio_anno.
+        current = scuola.data_inizio_anno + timedelta(days=(7 - scuola.data_inizio_anno.weekday()) % 7)
+
+        weeks = []
+        week_num = 1
+        while current <= scuola.data_fine_anno:
+            weeks.append({
+                "start": current.isoformat(),
+                "end": (current + timedelta(days=4)).isoformat(),
+                "week_num": week_num,
+            })
+            current += timedelta(days=7)
+            week_num += 1
+
+        return weeks
+
     # ===== Helper Methods =====
 
     def _generate_default_grid(self) -> Dict[str, List[Dict[str, Any]]]:

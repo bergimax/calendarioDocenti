@@ -1,5 +1,46 @@
 """End-to-end tests for the /api/availability routes."""
 
+from datetime import date, timedelta
+
+
+def test_list_weeks_endpoint(client, school_setup):
+    """
+    Regression test: GET /api/availability/weeks didn't exist at all, so
+    the week selector on both the Disponibilità and Orario pages (which
+    both fetch this) was always empty.
+    """
+    r = client.get("/api/availability/weeks")
+    assert r.status_code == 200
+    weeks = r.json()["weeks"]
+
+    assert weeks, "expected at least one week in the anno formativo"
+    assert weeks[0]["week_num"] == 1
+    assert [w["week_num"] for w in weeks] == list(range(1, len(weeks) + 1))
+    for w in weeks:
+        assert date.fromisoformat(w["start"]).weekday() == 0  # Monday
+        assert date.fromisoformat(w["end"]) == date.fromisoformat(w["start"]) + timedelta(days=4)
+
+    # The fixture's own week_start (2026-04-06, within data_inizio_anno
+    # 2026-01-01..data_fine_anno 2026-06-30) must be one of them.
+    assert school_setup["week_start"] in {w["start"] for w in weeks}
+
+
+def test_list_teachers_endpoint(client, school_setup):
+    """
+    Regression test: GET /api/teachers didn't exist, so the Disponibilità
+    page's teacher grid was always empty.
+    """
+    r = client.get("/api/teachers")
+    assert r.status_code == 200
+    teachers = r.json()
+
+    by_name = {t["nome"]: t for t in teachers}
+    assert set(by_name) == set(school_setup["teachers_by_name"])
+    for nome, teacher_id in school_setup["teachers_by_name"].items():
+        assert by_name[nome]["teacher_id"] == teacher_id
+    assert by_name["Prof Alfa"]["tipo"] == "ASSUNTO"
+    assert by_name["Prof Beta"]["tipo"] == "CONTRATTO"
+
 
 def test_new_teacher_gets_default_grid(client, school_setup):
     teacher_id = next(iter(school_setup["teachers_by_name"].values()))
