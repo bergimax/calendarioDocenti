@@ -90,3 +90,91 @@ def test_setup_save_without_prior_validate_returns_error(client):
     )
     assert r.status_code == 200
     assert r.json()["status"] == "error"
+
+
+def _upload_docenti(client, setup_file_data):
+    r = client.post(
+        "/api/teachers/upload",
+        files={"file": ("docenti.csv", setup_file_data["docenti"].encode(), "text/csv")},
+    )
+    assert r.status_code == 200, r.text
+    return r.json()["file_id"]
+
+
+def test_apply_correction_updates_cached_teacher(client, setup_file_data):
+    """
+    Regression test: POST /api/setup/apply-correction ("Salva correzione"
+    in the setup wizard) didn't exist as a route at all.
+    """
+    file_id = _upload_docenti(client, setup_file_data)
+
+    r = client.post(
+        "/api/setup/apply-correction",
+        json={"file_id": file_id, "correction": {"entity": "Prof Beta", "field": "email", "new_value": "beta@x.it"}},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "applied"
+    assert body["file_type"] == "docenti"
+
+
+def test_apply_correction_rejects_invalid_value(client, setup_file_data):
+    file_id = _upload_docenti(client, setup_file_data)
+
+    r = client.post(
+        "/api/setup/apply-correction",
+        json={"file_id": file_id, "correction": {"entity": "Prof Beta", "field": "tipo", "new_value": "STAGISTA"}},
+    )
+    assert r.status_code == 400
+
+
+def test_apply_correction_unknown_file_id(client, setup_file_data):
+    r = client.post(
+        "/api/setup/apply-correction",
+        json={"file_id": "xyz_does-not-exist", "correction": {"entity": "Prof Beta", "field": "email", "new_value": "x@x.it"}},
+    )
+    assert r.status_code == 400
+
+
+def test_add_calendar_date_manual(client, setup_file_data):
+    """
+    Regression test: POST /api/calendar/add-date-manual (the setup
+    wizard's OCR fallback) didn't exist as a route at all.
+    """
+    r = client.post(
+        "/api/calendar/upload",
+        files={"file": ("calendario.csv", setup_file_data["calendario"].encode(), "text/csv")},
+    )
+    assert r.status_code == 200
+    file_id = r.json()["file_id"]
+
+    r = client.post(
+        "/api/calendar/add-date-manual",
+        json={
+            "file_id": file_id,
+            "date": "2026-04-11",
+            "ore_max_giornata": 5,
+            "flag_chiusura": False,
+            "flag_stage_classe_id": None,
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "added"
+    assert body["total_dates_loaded"] == 6  # the fixture's 5 rows + this one
+
+
+def test_add_calendar_date_manual_rejects_bad_ore(client):
+    r = client.post(
+        "/api/calendar/add-date-manual",
+        json={"date": "2026-04-11", "ore_max_giornata": 9, "flag_chiusura": False},
+    )
+    assert r.status_code == 400
+
+
+def test_add_calendar_date_manual_rejects_bad_date(client):
+    r = client.post(
+        "/api/calendar/add-date-manual",
+        json={"date": "not-a-date", "ore_max_giornata": 5, "flag_chiusura": False},
+    )
+    assert r.status_code == 400

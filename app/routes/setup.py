@@ -9,6 +9,7 @@ from app.schemas import (
     SetupValidationResponse,
     FieldValidationRequest,
     FieldValidationResponse,
+    CorrectionRequest,
     SetupSaveRequest,
     SetupSaveResponse,
 )
@@ -187,6 +188,71 @@ def validate_single_field(
 
     except Exception as e:
         logger.error(f"Field validation error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/setup/apply-correction")
+def apply_correction(
+    request: CorrectionRequest,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """
+    Commit a field correction confirmed in the setup wizard's
+    CorrectionForm ("Salva correzione"). `request.correction` carries
+    {field, entity, new_value} - `file_type` isn't sent by the frontend,
+    it's resolved from `file_id`'s own prefix (see SetupService.apply_correction).
+    """
+    correction = request.correction or {}
+
+    try:
+        service = _get_setup_service(db)
+        return service.apply_correction(
+            file_id=request.file_id,
+            entity_identifier=correction.get("entity"),
+            field=correction.get("field"),
+            new_value=correction.get("new_value"),
+        )
+
+    except ValueError as e:
+        logger.warning(f"Correction error: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Unexpected error applying correction: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/calendar/add-date-manual")
+def add_calendar_date_manual(
+    payload: Dict[str, Any],
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """
+    Manually add one calendar date - the fallback for a date the OCR/PDF
+    calendar parser missed (specs.md 3.1). Request:
+    {file_id, date, ore_max_giornata, flag_chiusura, flag_stage_classe_id}.
+    """
+    try:
+        try:
+            parsed_date = date.fromisoformat(str(payload["date"]))
+        except (KeyError, TypeError, ValueError):
+            raise HTTPException(status_code=400, detail=f"Invalid or missing date: {payload.get('date')!r}")
+
+        service = _get_setup_service(db)
+        total = service.add_calendar_date_manual(
+            data=parsed_date,
+            ore_max_giornata=payload["ore_max_giornata"],
+            flag_chiusura=payload.get("flag_chiusura", False),
+            flag_stage_classe_id=payload.get("flag_stage_classe_id"),
+        )
+        return {"status": "added", "total_dates_loaded": total}
+
+    except HTTPException:
+        raise
+    except (KeyError, ValueError) as e:
+        logger.warning(f"Manual calendar date error: {e}")
+        raise HTTPException(status_code=400, detail=str(e) or "Missing required field")
+    except Exception as e:
+        logger.error(f"Unexpected error adding manual calendar date: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
