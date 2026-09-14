@@ -223,6 +223,7 @@ class QuickActionRequest(BaseModel):
 class ChatMessageCreate(BaseModel):
     """Chat message creation."""
     schedule_id: str
+    week_start: date
     message: str
 
 

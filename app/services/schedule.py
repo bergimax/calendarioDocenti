@@ -418,11 +418,114 @@ class ScheduleService:
         this week and re-solve, replacing the current schedule's slots in
         place (same schedule_id) with the result.
         """
-        from app.models import OrarioSettimanale, SlotLezione, AuditLog
-        from app.domain.solver import ScheduleSolver, DerogaConfig
+        from app.domain.solver import DerogaConfig
 
         if action_type not in QUICK_ACTIONS:
             return {"status": "error", "message": f"Unknown quick action: {action_type!r}"}
+
+        deroga = DerogaConfig(action_type=action_type, classe_id=class_id, docente_id=teacher_id)
+        return self._regenerate_in_place(
+            scuola_id, week_start,
+            azione="QUICK_ACTION",
+            dettagli={"action_type": action_type, "class_id": class_id, "teacher_id": teacher_id},
+            timeout_seconds=timeout_seconds,
+            deroga=deroga,
+        )
+
+    def exclude_docente_day(
+        self, scuola_id: str, week_start: date, docente_id: str, giorno: str,
+    ) -> Dict[str, Any]:
+        """AI chat "escludi [docente] [giorno]": zero out a docente's hours for one giorno this week."""
+        from app.domain.solver import GiornoEnum
+
+        if giorno not in GiornoEnum.__members__:
+            return {"status": "error", "message": f"Invalid giorno: {giorno!r}"}
+
+        return self._regenerate_in_place(
+            scuola_id, week_start,
+            azione="CHAT_EXCLUDE_DAY",
+            dettagli={"docente_id": docente_id, "giorno": giorno},
+            exclude_docente_giorno={(docente_id, GiornoEnum[giorno].value)},
+        )
+
+    def cap_docente_weekly_hours(
+        self, scuola_id: str, week_start: date, docente_id: str, max_hours: int,
+    ) -> Dict[str, Any]:
+        """AI chat "riduci ore [docente] a massimo N": hard weekly-hours cap for this week."""
+        return self._regenerate_in_place(
+            scuola_id, week_start,
+            azione="CHAT_REDUCE_WORKLOAD",
+            dettagli={"docente_id": docente_id, "max_hours": max_hours},
+            max_hours_per_docente={docente_id: max_hours},
+        )
+
+    def set_max_consecutive_teoria(
+        self, scuola_id: str, week_start: date, max_hours: int,
+    ) -> Dict[str, Any]:
+        """AI chat "imposta massimo N ore consecutive di teoria" for this week."""
+        return self._regenerate_in_place(
+            scuola_id, week_start,
+            azione="CHAT_SET_SOFT_CONSTRAINT",
+            dettagli={"constraint_type": "consecutive_hours", "max_hours": max_hours},
+            max_consecutive_teoria=max_hours,
+        )
+
+    def move_lesson(
+        self, scuola_id: str, week_start: date, classe_id: str, materia_id: str,
+        from_giorno: str, to_giorno: str,
+    ) -> Dict[str, Any]:
+        """
+        AI chat "sposta [materia] [classe] da [giorno] a [giorno]": move
+        every slot for this classe/materia on from_giorno to to_giorno
+        (same ora_inizio), through modify_slot so it's validated and
+        rescored exactly like a manual drag-and-drop edit.
+        """
+        from app.models import OrarioSettimanale, SlotLezione
+
+        orario = self.db.query(OrarioSettimanale).filter(
+            OrarioSettimanale.scuola_id == scuola_id,
+            OrarioSettimanale.settimana_inizio == week_start,
+        ).first()
+        if not orario:
+            return {"status": "error", "message": "No schedule found for this week"}
+
+        matching = self.db.query(SlotLezione).filter(
+            SlotLezione.orario_settimanale_id == orario.id,
+            SlotLezione.classe_id == classe_id,
+            SlotLezione.materia_id == materia_id,
+            SlotLezione.giorno == from_giorno,
+        ).all()
+        if not matching:
+            return {"status": "error", "message": "No matching lesson found on that day"}
+
+        result = None
+        for slot in matching:
+            result = self.modify_slot(scuola_id, week_start, slot.id, {"giorno": to_giorno})
+            if result["status"] != "modified":
+                return result  # bail on first failure, its message explains why
+        return result
+
+    def _regenerate_in_place(
+        self,
+        scuola_id: str,
+        week_start: date,
+        *,
+        azione: str,
+        dettagli: Dict[str, Any],
+        success_status: str = "applied",
+        timeout_seconds: int = 60,
+        **solver_kwargs,
+    ) -> Dict[str, Any]:
+        """
+        Shared machinery behind apply_quick_action and the AI chat's
+        exclude-day/reduce-workload/soft-constraint intents: re-solve the
+        full week with extra solver_kwargs (a DerogaConfig relaxation, or
+        one of the chat's hard-constraint additions - see
+        ScheduleSolver.__init__), then replace this week's slots in place
+        (same schedule_id).
+        """
+        from app.models import OrarioSettimanale, SlotLezione, AuditLog
+        from app.domain.solver import ScheduleSolver
 
         orario = self.db.query(OrarioSettimanale).filter(
             OrarioSettimanale.scuola_id == scuola_id,
@@ -437,15 +540,14 @@ class ScheduleService:
         if not context.assegnazioni:
             return {"status": "error", "message": "No teacher-class-subject assignments found."}
 
-        deroga = DerogaConfig(action_type=action_type, classe_id=class_id, docente_id=teacher_id)
-        solver = ScheduleSolver(context, deroga=deroga)
+        solver = ScheduleSolver(context, **solver_kwargs)
         solver.build_model()
         status = solver.solve(timeout_seconds=timeout_seconds)
 
         if status not in ("OPTIMAL", "FEASIBLE"):
             return {
                 "status": "error",
-                "message": "No feasible schedule found even with this exemption applied.",
+                "message": "No feasible schedule found with this change applied.",
             }
 
         slots = solver.extract_solution()
@@ -476,19 +578,19 @@ class ScheduleService:
             audit = AuditLog(
                 scuola_id=scuola_id,
                 orario_settimanale_id=orario.id,
-                azione="QUICK_ACTION",
-                dettagli={"action_type": action_type, "class_id": class_id, "teacher_id": teacher_id},
+                azione=azione,
+                dettagli=dettagli,
             )
             self.db.add(audit)
             self.db.commit()
 
         except Exception as e:
             self.db.rollback()
-            logger.error(f"Error applying quick action: {e}")
+            logger.error(f"Error regenerating schedule ({azione}): {e}")
             return {"status": "error", "message": str(e)}
 
         updated = self.repo.get_schedule_by_week(scuola_id, week_start)
-        return {"status": "applied", **updated}
+        return {"status": success_status, **updated}
 
     def export_pdf(self, scuola_id: str, week_start: date) -> Dict[str, Any]:
         """

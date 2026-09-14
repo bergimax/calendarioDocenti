@@ -106,10 +106,34 @@ class ScheduleSolver:
     Uses Google OR-Tools CP-SAT solver.
     """
 
-    def __init__(self, context: ScheduleContext, deroga: Optional[DerogaConfig] = None):
-        """Initialize solver with problem context."""
+    def __init__(
+        self,
+        context: ScheduleContext,
+        deroga: Optional[DerogaConfig] = None,
+        exclude_docente_giorno: Optional[Set[Tuple[str, int]]] = None,
+        max_hours_per_docente: Optional[Dict[str, int]] = None,
+        max_consecutive_teoria: Optional[int] = None,
+    ):
+        """
+        Initialize solver with problem context.
+
+        The last three arguments exist for the AI chat's move/exclude/reduce
+        requests (app/services/chat.py): unlike `deroga` (relaxes one rule),
+        these *add* extra hard/soft restrictions for one regeneration -
+        temporary and week-scoped, the same as a deroga, just tightening
+        instead of loosening.
+        - exclude_docente_giorno: {(docente_id, giorno_idx)} forced to 0
+          hours that day (e.g. "escludi Prof Rossi martedì").
+        - max_hours_per_docente: {docente_id: cap} hard weekly-hours cap
+          (e.g. "riduci ore Prof Rossi a massimo 10").
+        - max_consecutive_teoria: overrides the default 2-hour no-penalty
+          cap for _soft_teoria_consecutive school-wide.
+        """
         self.context = context
         self.deroga = deroga
+        self.exclude_docente_giorno = exclude_docente_giorno or set()
+        self.max_hours_per_docente = max_hours_per_docente or {}
+        self.max_consecutive_teoria = max_consecutive_teoria
         self.model = None
         self.solver = None
         self.solution_callback = None
@@ -177,6 +201,10 @@ class ScheduleSolver:
 
         # Hard 6: Don't exceed residual hours
         self._constraint_monte_ore_limit()
+
+        # Hard 7 & 8: AI-chat-requested exclusions/caps for this run (see __init__)
+        self._constraint_chat_exclusions()
+        self._constraint_chat_max_hours()
 
     def _deroga_active(self, action_type: str, *, classe_id: str = None, docente_id: str = None) -> bool:
         """
@@ -412,6 +440,35 @@ class ScheduleSolver:
                 if slots_for_asg:
                     self.model.Add(sum(slots_for_asg) <= asg.ore_residue)
 
+    def _constraint_chat_exclusions(self) -> None:
+        """Hard constraint 7: zero out a docente's hours on a specific giorno (chat "escludi ... giorno")."""
+        if not self.exclude_docente_giorno:
+            return
+        for asg in self.context.assegnazioni:
+            for giorno in range(5):
+                if (asg.docente_id, giorno) not in self.exclude_docente_giorno:
+                    continue
+                for ora in range(6):
+                    key = (asg.assegnazione_id, giorno, ora)
+                    if key in self.x:
+                        self.model.Add(self.x[key] == 0)
+
+    def _constraint_chat_max_hours(self) -> None:
+        """Hard constraint 8: cap a docente's total weekly hours (chat "riduci ore ... massimo N")."""
+        if not self.max_hours_per_docente:
+            return
+        for docente_id, cap in self.max_hours_per_docente.items():
+            slots_for_docente = [
+                self.x[(asg.assegnazione_id, giorno, ora)]
+                for asg in self.context.assegnazioni
+                if asg.docente_id == docente_id
+                for giorno in range(5)
+                for ora in range(6)
+                if (asg.assegnazione_id, giorno, ora) in self.x
+            ]
+            if slots_for_docente:
+                self.model.Add(sum(slots_for_docente) <= cap)
+
     def _add_soft_constraints(self) -> None:
         """Add soft constraints (optimizable)."""
         logger.info("Adding soft constraints...")
@@ -438,10 +495,15 @@ class ScheduleSolver:
         for classe_id in self.context.classi_set:
             classe_teoria = [asg for asg in teoria_asgs if asg.classe_id == classe_id]
 
-            # Deroga: "Forza 3 ore teoria" - raise the no-penalty cap from 2
-            # to 3 consecutive hours for this classe (or every classe, if
-            # the deroga isn't scoped to one).
-            max_consecutive = 3 if self._deroga_active("force_3_hours_theory", classe_id=classe_id) else 2
+            # Base cap: 2, unless the chat asked for a specific value
+            # ("imposta massimo 3 ore consecutive di teoria").
+            max_consecutive = self.max_consecutive_teoria if self.max_consecutive_teoria is not None else 2
+
+            # Deroga: "Forza 3 ore teoria" - raise the no-penalty cap to 3
+            # consecutive hours for this classe (or every classe, if the
+            # deroga isn't scoped to one).
+            if self._deroga_active("force_3_hours_theory", classe_id=classe_id):
+                max_consecutive = 3
 
             for giorno in range(5):
                 # Check 3-hour windows (e.g., ora 0-1-2, 1-2-3, etc.)

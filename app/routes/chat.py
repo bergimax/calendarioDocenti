@@ -44,22 +44,18 @@ async def send_chat_message(
     async def generate_sse():
         """Generate SSE stream."""
         try:
-            # Create service
             service = ChatService(db)
 
-            # Get schedule to extract week_start
-            # TODO: Extract from schedule_id or pass as parameter
-            week_start = date.today()  # Placeholder
-
-            # Process message and yield events
             async for event in service.send_message(
                 scuola_id=scuola_id,
                 schedule_id=request.schedule_id,
-                week_start=week_start,
+                week_start=request.week_start,
                 message=request.message,
             ):
-                # Format as SSE
-                yield f"data: {json.dumps(event)}\n\n"
+                # default=str: the "ready" event's new_schedule carries
+                # date/datetime fields (week_start, created_at, ...) that
+                # plain json.dumps can't serialize on its own.
+                yield f"data: {json.dumps(event, default=str)}\n\n"
 
         except Exception as e:
             logger.error(f"Error in chat stream: {e}")
@@ -68,23 +64,22 @@ async def send_chat_message(
     return StreamingResponse(generate_sse(), media_type="text/event-stream")
 
 
-@router.get("/chat/history/{schedule_id}")
+@router.get("/chat/history/{week_start}")
 def get_chat_history(
-    schedule_id: str,
+    week_start: date,
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
     """
-    Retrieve chat history for schedule.
+    Retrieve chat history for the week's schedule (the frontend fetches
+    this by week, not by schedule_id - a schedule_id can change across
+    weeks but stays stable for a given week after a regenerate, see
+    ScheduleRepository.save_generated_schedule).
     """
     scuola_id = _get_current_school_id()
 
     try:
         service = ChatService(db)
-        result = service.get_chat_history(
-            scuola_id=scuola_id,
-            schedule_id=schedule_id,
-        )
-        return result
+        return service.get_chat_history_for_week(scuola_id=scuola_id, week_start=week_start)
 
     except Exception as e:
         logger.error(f"Error retrieving chat history: {e}")
