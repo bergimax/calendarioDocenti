@@ -33,6 +33,25 @@ def test_generated_schedule_respects_closure_day(client, school_setup):
     assert not any(s["giorno"] == "LUNEDI" for s in body["slots"])
 
 
+def test_generated_schedule_slots_include_names(client, school_setup):
+    """
+    Regression test: the generate response's slots used to carry only ids
+    (classe_id/docente_id/materia_id), unlike every other schedule endpoint
+    (get_schedule, modify_slot, apply_quick_action), which already included
+    the *_nome fields - the frontend showed raw UUIDs as column headers
+    right after clicking "Genera nuovo orario" until the next reload.
+    """
+    week = school_setup["week_start"]
+    body = client.post("/api/schedule/generate", json={"week_start": week}).json()
+    assert body["status"] == "generated"
+    assert body["slots"], "expected at least one slot"
+    for s in body["slots"]:
+        assert s["classe_nome"], s
+        assert s["docente_nome"], s
+        assert s["materia_nome"], s
+        assert s["materia_tipo"] in ("TEORIA", "PRATICA")
+
+
 def test_generated_schedule_pairs_shared_teacher(client, school_setup):
     """
     Regression test: paired classes taught by the same docente

@@ -824,8 +824,12 @@ class ScheduleSolver:
                 slot = {
                     "assegnazione_id": assegnazione_id,
                     "docente_id": asg.docente_id,
+                    "docente_nome": asg.docente_nome,
                     "classe_id": asg.classe_id,
+                    "classe_nome": asg.classe_nome,
                     "materia_id": asg.materia_id,
+                    "materia_nome": asg.materia_nome,
+                    "materia_tipo": asg.materia_tipo,
                     "giorno": giorni_nomi[giorno],
                     "ora_inizio": 8 + ora,
                     "ora_fine": 8 + ora + 1,

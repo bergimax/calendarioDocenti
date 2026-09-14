@@ -41,7 +41,7 @@ function TeachersPage() {
             onChange={(e) => set("tipo", e.target.value)}
           >
             <option value="ASSUNTO">Assunto</option>
-            <option value="CONTRATTISTA">Contrattista</option>
+            <option value="CONTRATTO">Contrattista</option>
           </Select>
         </>
       )}

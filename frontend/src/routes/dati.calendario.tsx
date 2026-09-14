@@ -18,7 +18,7 @@ function CalendarPage() {
         { key: "data", header: "Data", render: (r) => r.data },
         { key: "ore", header: "Ore max", render: (r) => r.ore_max_giornata },
         { key: "chiusura", header: "Chiusura", render: (r) => (r.flag_chiusura ? "Sì" : "No") },
-        { key: "stage", header: "Stage classe", render: (r) => r.stage_classe_id ?? "—" },
+        { key: "stage", header: "Stage classe", render: (r) => r.flag_stage_classe_id ?? "—" },
       ]}
       form={({ value, set }) => (
         <>
@@ -47,8 +47,8 @@ function CalendarPage() {
           </Select>
           <Field
             label="Classe in stage (ID)"
-            value={value["stage_classe_id"] ?? ""}
-            onChange={(e) => set("stage_classe_id", e.target.value)}
+            value={value["flag_stage_classe_id"] ?? ""}
+            onChange={(e) => set("flag_stage_classe_id", e.target.value)}
           />
         </>
       )}

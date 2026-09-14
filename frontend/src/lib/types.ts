@@ -64,20 +64,20 @@ export interface Teacher {
   teacher_id: string;
   nome: string;
   email: string;
-  tipo: "ASSUNTO" | "CONTRATTISTA";
+  tipo: "ASSUNTO" | "CONTRATTO";
   materia?: string;
 }
 
 export interface SchoolClass {
   classe_id: string;
   nome: string;
-  anno?: number;
+  n_studenti?: number;
 }
 
 export interface Subject {
   materia_id: string;
   nome: string;
-  tipologia: "TEORIA" | "PRATICA";
+  tipo: "TEORIA" | "PRATICA";
   peso_cognitivo?: "ALTO" | "MEDIO" | "BASSO";
 }
 
@@ -102,7 +102,7 @@ export interface CalendarEntry {
   data: string;
   ore_max_giornata: 4 | 5 | 6;
   flag_chiusura: boolean;
-  stage_classe_id?: string | null;
+  flag_stage_classe_id?: string | null;
 }
 
 export interface SlotLezione {
@@ -115,7 +115,7 @@ export interface SlotLezione {
   ora_fine: string;
   accoppiata?: boolean;
   classe_accoppiata_id?: string;
-  tipologia?: "TEORIA" | "PRATICA";
+  materia_tipo?: "TEORIA" | "PRATICA";
   conflitto?: boolean;
   materia_nome?: string;
   docente_nome?: string;

@@ -103,7 +103,7 @@ function SchedulePage() {
         body: { action_type: actionType, parameters: {} },
       });
       setSchedule(res);
-      setNotice(`Deroga applicata · nuovo punteggio ${res.quality_score}`);
+      setNotice(`Deroga applicata · nuovo punteggio ${Math.round(res.quality_score)}`);
     } catch (err) {
       setNotice(apiErrorMessage(err));
     }
@@ -214,7 +214,7 @@ function SchedulePage() {
               <div>
                 <div className="label-mono">Qualità orario</div>
                 <div className="mt-1 font-display text-4xl font-bold leading-none">
-                  {active?.quality_score ?? "—"}
+                  {active?.quality_score != null ? Math.round(active.quality_score) : "—"}
                   <span className="text-lg text-muted-foreground">/100</span>
                 </div>
               </div>
@@ -378,7 +378,7 @@ function ScheduleTable({
                   if (paired) skip.add(slot.classe_accoppiata_id as string);
                   const tone = slot.conflitto
                     ? "border-conflict bg-conflict/10"
-                    : slot.tipologia === "PRATICA"
+                    : slot.materia_tipo === "PRATICA"
                       ? "border-practical bg-practical/10"
                       : "border-theory bg-theory/10";
                   const dimmed =

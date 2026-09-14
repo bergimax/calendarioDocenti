@@ -206,6 +206,56 @@ class AvailabilityService:
             for d in docenti
         ]
 
+    def create_teacher(self, scuola_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Create a docente for the "Dati scuola" management page."""
+        nome = (data.get("nome") or "").strip()
+        if not nome:
+            raise ValueError("nome is required")
+        tipo = (data.get("tipo") or "ASSUNTO").strip().upper()
+        if tipo not in ("ASSUNTO", "CONTRATTO"):
+            raise ValueError(f"tipo must be ASSUNTO or CONTRATTO, got {tipo!r}")
+
+        docente = Docente(
+            scuola_id=scuola_id,
+            nome=nome,
+            email=(data.get("email") or "").strip() or None,
+            tipo=tipo,
+        )
+        self.db.add(docente)
+        self.db.commit()
+        return {"teacher_id": docente.id, "nome": docente.nome, "email": docente.email or "", "tipo": docente.tipo}
+
+    def update_teacher(self, scuola_id: str, teacher_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
+        docente = self.db.query(Docente).filter_by(id=teacher_id, scuola_id=scuola_id).first()
+        if not docente:
+            raise ValueError(f"Teacher {teacher_id!r} not found")
+
+        if "nome" in data and data["nome"]:
+            docente.nome = data["nome"].strip()
+        if "email" in data:
+            docente.email = (data["email"] or "").strip() or None
+        if "tipo" in data and data["tipo"]:
+            tipo = data["tipo"].strip().upper()
+            if tipo not in ("ASSUNTO", "CONTRATTO"):
+                raise ValueError(f"tipo must be ASSUNTO or CONTRATTO, got {tipo!r}")
+            docente.tipo = tipo
+
+        self.db.commit()
+        return {"teacher_id": docente.id, "nome": docente.nome, "email": docente.email or "", "tipo": docente.tipo}
+
+    def delete_teacher(self, scuola_id: str, teacher_id: str) -> None:
+        from sqlalchemy.exc import IntegrityError
+
+        docente = self.db.query(Docente).filter_by(id=teacher_id, scuola_id=scuola_id).first()
+        if not docente:
+            raise ValueError(f"Teacher {teacher_id!r} not found")
+        try:
+            self.db.delete(docente)
+            self.db.commit()
+        except IntegrityError:
+            self.db.rollback()
+            raise ValueError("Cannot delete: this teacher has related assignments, availability, or schedule slots")
+
     def list_weeks(self, scuola_id: str) -> List[Dict[str, Any]]:
         """
         Every Monday-starting school week within this scuola's anno

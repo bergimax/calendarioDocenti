@@ -33,6 +33,44 @@ def list_teachers(db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
+@router.post("/teachers")
+def create_teacher(data: Dict[str, Any], db: Session = Depends(get_db)) -> Dict[str, Any]:
+    """Create a docente ("Dati scuola" management page)."""
+    scuola_id = _get_current_school_id()
+    try:
+        return AvailabilityService(db).create_teacher(scuola_id, data)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error creating teacher: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.put("/teachers/{teacher_id}")
+def update_teacher(teacher_id: str, data: Dict[str, Any], db: Session = Depends(get_db)) -> Dict[str, Any]:
+    scuola_id = _get_current_school_id()
+    try:
+        return AvailabilityService(db).update_teacher(scuola_id, teacher_id, data)
+    except ValueError as e:
+        raise HTTPException(status_code=404 if "not found" in str(e) else 400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error updating teacher: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.delete("/teachers/{teacher_id}")
+def delete_teacher(teacher_id: str, db: Session = Depends(get_db)) -> Dict[str, Any]:
+    scuola_id = _get_current_school_id()
+    try:
+        AvailabilityService(db).delete_teacher(scuola_id, teacher_id)
+        return {"status": "deleted", "teacher_id": teacher_id}
+    except ValueError as e:
+        raise HTTPException(status_code=404 if "not found" in str(e) else 400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error deleting teacher: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
 @router.get("/availability/weeks")
 def list_weeks(db: Session = Depends(get_db)) -> Dict[str, Any]:
     """

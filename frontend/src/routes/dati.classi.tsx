@@ -16,7 +16,7 @@ function ClassesPage() {
       emptyHint="Nessuna classe restituita dal server."
       columns={[
         { key: "nome", header: "Classe", render: (r) => r.nome },
-        { key: "anno", header: "Anno", render: (r) => r.anno ?? "—" },
+        { key: "n_studenti", header: "N. studenti", render: (r) => r.n_studenti ?? "—" },
       ]}
       form={({ value, set }) => (
         <>
@@ -27,10 +27,10 @@ function ClassesPage() {
             placeholder="1A"
           />
           <Field
-            label="Anno"
+            label="N. studenti"
             type="number"
-            value={value["anno"] ?? ""}
-            onChange={(e) => set("anno", e.target.value)}
+            value={value["n_studenti"] ?? ""}
+            onChange={(e) => set("n_studenti", e.target.value)}
           />
         </>
       )}

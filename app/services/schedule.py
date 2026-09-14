@@ -87,8 +87,12 @@ class ScheduleService:
                     SlotLezioneResponse(
                         slot_id="",  # will be assigned in DB, use temp id
                         classe_id=s["classe_id"],
+                        classe_nome=s.get("classe_nome"),
                         docente_id=s["docente_id"],
+                        docente_nome=s.get("docente_nome"),
                         materia_id=s["materia_id"],
+                        materia_nome=s.get("materia_nome"),
+                        materia_tipo=s.get("materia_tipo"),
                         giorno=s["giorno"],
                         ora_inizio=s["ora_inizio"],
                         ora_fine=s["ora_fine"],

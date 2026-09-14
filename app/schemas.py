@@ -173,8 +173,12 @@ class SlotLezioneResponse(BaseModel):
     """Slot response."""
     slot_id: str
     classe_id: str
+    classe_nome: Optional[str] = None
     docente_id: str
+    docente_nome: Optional[str] = None
     materia_id: str
+    materia_nome: Optional[str] = None
+    materia_tipo: Optional[str] = None
     giorno: Giorno
     ora_inizio: int
     ora_fine: int

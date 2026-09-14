@@ -17,9 +17,9 @@ function SubjectsPage() {
       columns={[
         { key: "nome", header: "Materia", render: (r) => r.nome },
         {
-          key: "tipologia",
+          key: "tipo",
           header: "Tipologia",
-          render: (r) => (r.tipologia === "PRATICA" ? "Pratica" : "Teoria"),
+          render: (r) => (r.tipo === "PRATICA" ? "Pratica" : "Teoria"),
         },
         { key: "peso", header: "Peso cognitivo", render: (r) => r.peso_cognitivo ?? "—" },
       ]}
@@ -32,8 +32,8 @@ function SubjectsPage() {
           />
           <Select
             label="Tipologia"
-            value={value["tipologia"] ?? "TEORIA"}
-            onChange={(e) => set("tipologia", e.target.value)}
+            value={value["tipo"] ?? "TEORIA"}
+            onChange={(e) => set("tipo", e.target.value)}
           >
             <option value="TEORIA">Teoria</option>
             <option value="PRATICA">Pratica</option>
