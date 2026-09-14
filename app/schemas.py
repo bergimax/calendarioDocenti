@@ -86,12 +86,11 @@ class FileUploadResponse(BaseModel):
 
 
 class ValidationWarning(BaseModel):
-    """Validation warning."""
-    field: Optional[str] = None
-    row: Optional[int] = None
-    docente: Optional[str] = None
+    """Validation warning: a non-fatal data-quality issue tied to one named
+    entity (a docente/classe/materia nome), so the setup wizard can offer a
+    direct "Correggi" shortcut for it."""
+    entity: str
     issue: str
-    suggestion: Optional[str] = None
 
 
 class ValidationError(BaseModel):

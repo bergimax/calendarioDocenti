@@ -206,7 +206,7 @@ class SetupService:
 
         # 2. Cross-validate coherence
         if all(r.success for r in results.values()):
-            valid, errors = DataValidator.validate_all_data(
+            valid, errors, warnings = DataValidator.validate_all_data(
                 docenti=parsed_data.get("docenti", []),
                 classi=parsed_data.get("classi", []),
                 materie=parsed_data.get("materie", []),
@@ -214,6 +214,14 @@ class SetupService:
                 accoppiamenti=parsed_data.get("accoppiamenti", []),
                 calendario=parsed_data.get("calendario", []),
             )
+
+            # Route warnings (unassigned docente/classe/materia - not fatal,
+            # but the admin should get a chance to fix them inline; see
+            # CorrectionForm in setup.tsx) to their file's own results entry.
+            for w in warnings:
+                target = results.get(w["file_type"])
+                if target is not None:
+                    target.warnings.append(ValidationWarning(entity=w["entity"], issue=w["issue"]))
 
             if not valid:
                 # Add cross-validation errors to relevant file results

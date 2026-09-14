@@ -31,7 +31,7 @@ def test_validate_docente_rejects_bad_tipo():
 
 
 def test_validate_all_data_flags_dangling_assignment():
-    valid, errors = DataValidator.validate_all_data(
+    valid, errors, warnings = DataValidator.validate_all_data(
         docenti=[{"nome": "Prof Alfa"}],
         classi=[{"nome": "1A"}],
         materie=[{"nome": "Matematica"}],
@@ -41,3 +41,23 @@ def test_validate_all_data_flags_dangling_assignment():
     )
     assert valid is False
     assert any("Prof Sconosciuto" in e for e in errors)
+
+
+def test_validate_all_data_warns_about_unassigned_entities():
+    """
+    Regression test: validate_all_data used to compute these warnings and
+    then discard them (only errors were returned), so the setup wizard's
+    "Correggi" flow for warnings was unreachable - nothing ever populated
+    FileValidationResult.warnings.
+    """
+    valid, errors, warnings = DataValidator.validate_all_data(
+        docenti=[{"nome": "Prof Alfa"}, {"nome": "Prof Senza Ore"}],
+        classi=[{"nome": "1A"}],
+        materie=[{"nome": "Matematica"}],
+        assegnazioni=[{"docente_nome": "Prof Alfa", "classe_nome": "1A", "materia_nome": "Matematica"}],
+        accoppiamenti=[],
+        calendario=[],
+    )
+    assert valid is True
+    assert errors == []
+    assert any(w["entity"] == "Prof Senza Ore" and w["file_type"] == "docenti" for w in warnings)

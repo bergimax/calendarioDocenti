@@ -30,6 +30,23 @@ def test_setup_validate_success(client, setup_file_data):
         assert body["results"][file_type]["success"] is True
 
 
+def test_setup_validate_surfaces_unassigned_teacher_as_warning(client, setup_file_data):
+    """
+    Regression test: DataValidator.validate_all_data computed these
+    warnings and then discarded them (only errors were ever returned), so
+    /api/setup/validate's results[*].warnings was always [] and the setup
+    wizard's "Correggi" button for warnings was unreachable.
+    """
+    setup_file_data["docenti"] += "Prof SenzaOre,,ASSUNTO\n"
+
+    r = client.post("/api/setup/validate", json=setup_file_data)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["can_proceed"] is True  # a warning isn't a blocking error
+    warnings = body["results"]["docenti"]["warnings"]
+    assert any(w["entity"] == "Prof SenzaOre" for w in warnings), warnings
+
+
 def test_setup_validate_reports_errors_for_bad_data(client, setup_file_data):
     setup_file_data["docenti"] = "nome,email,tipo\nProf Alfa,alfa@x.it,STAGISTA\n"
     r = client.post("/api/setup/validate", json=setup_file_data)

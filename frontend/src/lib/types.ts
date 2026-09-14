@@ -17,10 +17,15 @@ export interface ValidationIssue {
   [key: string]: string;
 }
 
+export interface ValidationWarning {
+  entity: string;
+  issue: string;
+}
+
 export interface FileValidation {
   success: boolean;
   preview?: Record<string, number | string>;
-  warnings: ValidationIssue[];
+  warnings: ValidationWarning[];
   errors: ValidationIssue[];
 }
 

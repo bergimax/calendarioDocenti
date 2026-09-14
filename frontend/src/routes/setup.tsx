@@ -106,7 +106,10 @@ function SetupPage() {
     setSaving(true);
     setSaveError(null);
     try {
-      await api("/api/setup/save", {
+      // Like /schedule's mutating endpoints, this replies HTTP 200 even when
+      // the save is rejected server-side (status: "error", e.g. a DB error) -
+      // must check before navigating away as if it had succeeded.
+      const res = await api<{ status: string; message?: string }>("/api/setup/save", {
         method: "POST",
         body: {
           file_ids: fileIds,
@@ -115,6 +118,7 @@ function SetupPage() {
           school_year: schoolYear,
         },
       });
+      if (res.status === "error") throw new Error(res.message ?? "Salvataggio non riuscito");
       navigate({ to: "/disponibilita" });
     } catch (err) {
       setSaveError(err);
@@ -213,14 +217,14 @@ function SetupPage() {
                         key={i}
                         className="mt-2 flex items-center gap-2 rounded-lg bg-warn/10 px-2 py-1.5 text-[11px]"
                       >
-                        <span className="flex-1">{Object.values(w).join(" · ")}</span>
+                        <span className="flex-1">{w.issue}</span>
                         <button
                           type="button"
                           className="font-semibold text-brand"
                           onClick={() =>
                             setCorrection({
                               fileType: type as FileType,
-                              entity: String(Object.values(w)[0] ?? ""),
+                              entity: w.entity,
                             })
                           }
                         >

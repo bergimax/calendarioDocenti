@@ -20,10 +20,14 @@ class DataValidator:
         assegnazioni: List[Dict[str, Any]],
         accoppiamenti: List[Dict[str, Any]],
         calendario: List[Dict[str, Any]],
-    ) -> Tuple[bool, List[str]]:
+    ) -> Tuple[bool, List[str], List[Dict[str, str]]]:
         """
         Cross-validate all entities.
-        Returns: (valid: bool, errors: List[str])
+        Returns: (valid, errors, warnings). Each warning is
+        {"file_type", "entity", "issue"} so the setup wizard can route it
+        to the right file's FileValidationResult and let the admin jump
+        straight to correcting that entity (see SetupService.
+        parse_and_validate_files and CorrectionForm in setup.tsx).
         """
         logger.info("Validating data coherence")
 
@@ -94,40 +98,43 @@ class DataValidator:
                         f"Calendar {idx}: stage class '{cal['stage_classe_id']}' not found"
                     )
 
-        # Warnings (not errors, but logged)
-        warnings = []
+        # Warnings (not errors - data is still usable, but flagged for review)
+        warnings: List[Dict[str, str]] = []
 
         # Check if any teacher has no assignments
         for docente in docenti:
             if not any(a["docente_nome"] == docente["nome"] for a in assegnazioni):
-                warnings.append(
-                    f"Teacher '{docente['nome']}' has no assignments"
-                )
+                warnings.append({
+                    "file_type": "docenti", "entity": docente["nome"],
+                    "issue": f"Teacher '{docente['nome']}' has no assignments",
+                })
 
         # Check if any class has no assignments
         for classe in classi:
             if not any(a["classe_nome"] == classe["nome"] for a in assegnazioni):
-                warnings.append(
-                    f"Class '{classe['nome']}' has no assignments"
-                )
+                warnings.append({
+                    "file_type": "classi", "entity": classe["nome"],
+                    "issue": f"Class '{classe['nome']}' has no assignments",
+                })
 
         # Check if any subject is unused
         for materia in materie:
             if not any(a["materia_nome"] == materia["nome"] for a in assegnazioni):
-                warnings.append(
-                    f"Subject '{materia['nome']}' is not assigned to any class"
-                )
+                warnings.append({
+                    "file_type": "materie", "entity": materia["nome"],
+                    "issue": f"Subject '{materia['nome']}' is not assigned to any class",
+                })
 
         for w in warnings:
-            logger.warning(f"Validation warning: {w}")
+            logger.warning(f"Validation warning: {w['issue']}")
 
         if errors:
             for e in errors:
                 logger.error(f"Validation error: {e}")
-            return False, errors
+            return False, errors, warnings
 
         logger.info("Data validation passed")
-        return True, []
+        return True, [], warnings
 
     @staticmethod
     def validate_docente(docente: Dict[str, Any]) -> Tuple[bool, str]:
