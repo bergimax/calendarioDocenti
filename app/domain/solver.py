@@ -216,6 +216,9 @@ class ScheduleSolver:
         # Hard 1: No teacher double-booking
         self._constraint_no_double_booking()
 
+        # Hard 1b: A classe can only have one lesson at a time
+        self._constraint_classe_no_overlap()
+
         # Hard 2: Day capacity constraint
         self._constraint_day_capacity()
 
@@ -249,30 +252,38 @@ class ScheduleSolver:
             return False
         return True
 
+    def _shared_docenti_pairs(
+        self, classe_a: str, classe_b: str, materia_id: str
+    ) -> List[Tuple["AssegnazioneDati", "AssegnazioneDati"]]:
+        """
+        For a classe-accoppiata (classe_a, classe_b, materia_id), find every
+        docente who has an assegnazione to BOTH sides for that materia - i.e.
+        actually runs a joint lesson for this pair, not just any one docente
+        from each side. A real accoppiamento's classes still have most of
+        their hours taught independently by their *other* docenti (who only
+        teach one side); only the docenti genuinely shared between both
+        should ever be forced to move together.
+        """
+        asgs_a = {a.docente_id: a for a in self.context.assegnazioni
+                  if a.classe_id == classe_a and a.materia_id == materia_id}
+        asgs_b = {a.docente_id: a for a in self.context.assegnazioni
+                  if a.classe_id == classe_b and a.materia_id == materia_id}
+        return [(asgs_a[docente_id], asgs_b[docente_id]) for docente_id in asgs_a.keys() & asgs_b.keys()]
+
     def _paired_assignment_ids_to_dedupe(self) -> Set[str]:
         """
-        When the same docente teaches both sides of a classe-accoppiata for the
-        common materia (the spec-intended case), _constraint_paired_classes
-        forces their two assegnazioni to always be equal (x_a == x_b): they
-        represent a single joint lesson, not two separate bookings. Without
-        this, _constraint_no_double_booking would sum both into the same
-        docente/giorno/ora slot and force the pair to always be 0 (sum <= 1
-        vs. x_a == x_b == 1 is unsatisfiable). Returns the assegnazione_ids
-        of the "B" side of such pairs, to be excluded from that sum.
+        _constraint_paired_classes forces a shared docente's two assegnazioni
+        (one per side of the pair) to always be equal (x_a == x_b): together
+        they represent a single joint lesson, not two separate bookings.
+        Without this, _constraint_no_double_booking would sum both into the
+        same docente/giorno/ora slot and force the pair to always be 0
+        (sum <= 1 vs. x_a == x_b == 1 is unsatisfiable). Returns the
+        assegnazione_ids of the "B" side of every such pair, to be excluded
+        from that sum.
         """
         skip_ids: Set[str] = set()
         for classe_a, classe_b, materia_id in self.context.classi_accoppiate:
-            asg_a = next(
-                (a for a in self.context.assegnazioni
-                 if a.classe_id == classe_a and a.materia_id == materia_id),
-                None,
-            )
-            asg_b = next(
-                (a for a in self.context.assegnazioni
-                 if a.classe_id == classe_b and a.materia_id == materia_id),
-                None,
-            )
-            if asg_a and asg_b and asg_a.docente_id == asg_b.docente_id:
+            for _asg_a, asg_b in self._shared_docenti_pairs(classe_a, classe_b, materia_id):
                 skip_ids.add(asg_b.assegnazione_id)
         return skip_ids
 
@@ -296,6 +307,34 @@ class ScheduleSolver:
                         for asg in asgs
                         if asg.assegnazione_id not in skip_ids
                         and (asg.assegnazione_id, giorno, ora) in self.x
+                    ]
+                    if overlapping:
+                        self.model.Add(sum(overlapping) <= 1)
+
+    def _constraint_classe_no_overlap(self) -> None:
+        """
+        Hard constraint 1b: a classe can only be in one lesson at a time -
+        at most one assegnazione (any docente) active per classe/giorno/ora.
+
+        _constraint_day_capacity only bounds the day's *total* filled-hour
+        count, not which specific hours those are - without this, nothing
+        stopped several docenti being piled onto the same hour (which still
+        counts toward that total) while other hours of the day stayed empty,
+        which is exactly what _soft_no_free_hours's weight-100 pressure to
+        maximize the count started doing once real per-assignment hours (and
+        real pairings) made high fill rates achievable.
+        """
+        classi_asgs: Dict[str, List[AssegnazioneDati]] = {}
+        for asg in self.context.assegnazioni:
+            classi_asgs.setdefault(asg.classe_id, []).append(asg)
+
+        for classe_id, asgs in classi_asgs.items():
+            for giorno in range(5):
+                for ora in range(6):
+                    overlapping = [
+                        self.x[(asg.assegnazione_id, giorno, ora)]
+                        for asg in asgs
+                        if (asg.assegnazione_id, giorno, ora) in self.x
                     ]
                     if overlapping:
                         self.model.Add(sum(overlapping) <= 1)
@@ -361,28 +400,15 @@ class ScheduleSolver:
                     self.model.Add(sum(hours_in_day) <= ore_max)
 
     def _constraint_paired_classes(self) -> None:
-        """Hard constraint 3: Paired classes must have same docente/giorno/ora."""
-        # Build map: (classe_a, classe_b, materia_id) -> True
-        paired_set = set()
+        """
+        Hard constraint 3: for a classe-accoppiata, only the docente(i) who
+        actually teach BOTH sides must have matching giorno/ora (one joint
+        lesson). A docente who only teaches one side of the pair is
+        unaffected - most of a paired class's day is still independent,
+        normal lessons with its *other* docenti; see _shared_docenti_pairs.
+        """
         for classe_a, classe_b, materia_id in self.context.classi_accoppiate:
-            paired_set.add((classe_a, classe_b, materia_id))
-            paired_set.add((classe_b, classe_a, materia_id))  # bidirectional
-
-        # Find assegnazioni for paired classes
-        for classe_a, classe_b, materia_id in self.context.classi_accoppiate:
-            asg_a = next(
-                (asg for asg in self.context.assegnazioni
-                 if asg.classe_id == classe_a and asg.materia_id == materia_id),
-                None
-            )
-            asg_b = next(
-                (asg for asg in self.context.assegnazioni
-                 if asg.classe_id == classe_b and asg.materia_id == materia_id),
-                None
-            )
-
-            if asg_a and asg_b:
-                # Must have same giorno/ora (docente should be same too)
+            for asg_a, asg_b in self._shared_docenti_pairs(classe_a, classe_b, materia_id):
                 for giorno in range(5):
                     for ora in range(6):
                         key_a = (asg_a.assegnazione_id, giorno, ora)
