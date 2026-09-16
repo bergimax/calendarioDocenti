@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
 from app.database import get_db
 from app.models import Admin, AdminSession
-from app.security import verify_password, generate_session_token
+from app.security import verify_password, generate_session_token, extract_bearer_token, get_current_admin
 from app.schemas import LoginRequest, LoginResponse
 import logging
 
@@ -12,12 +12,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 SESSION_TTL = timedelta(days=7)
-
-
-def _extract_token(authorization: Optional[str]) -> Optional[str]:
-    if not authorization or not authorization.lower().startswith("bearer "):
-        return None
-    return authorization.split(" ", 1)[1].strip()
 
 
 @router.post("/auth/login", response_model=LoginResponse)
@@ -37,7 +31,10 @@ def login(data: LoginRequest, db: Session = Depends(get_db)) -> LoginResponse:
 
 @router.post("/auth/logout")
 def logout(authorization: Optional[str] = Header(None), db: Session = Depends(get_db)) -> Dict[str, Any]:
-    token = _extract_token(authorization)
+    """Deletes the session row for this token if there is one - works even on an
+    already-expired token, unlike get_current_admin, since logging out should
+    always succeed client-side."""
+    token = extract_bearer_token(authorization)
     if token:
         db.query(AdminSession).filter(AdminSession.token == token).delete()
         db.commit()
@@ -45,10 +42,5 @@ def logout(authorization: Optional[str] = Header(None), db: Session = Depends(ge
 
 
 @router.get("/auth/me")
-def me(authorization: Optional[str] = Header(None), db: Session = Depends(get_db)) -> Dict[str, Any]:
-    token = _extract_token(authorization)
-    session = db.query(AdminSession).filter(AdminSession.token == token).first() if token else None
-    if not session or session.expires_at < datetime.utcnow():
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    admin = db.query(Admin).filter(Admin.id == session.admin_id).first()
-    return {"email": admin.email if admin else None}
+def me(admin: Admin = Depends(get_current_admin)) -> Dict[str, Any]:
+    return {"email": admin.email}

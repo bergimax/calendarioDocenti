@@ -72,6 +72,15 @@ export async function api<T>(path: string, options: Options = {}): Promise<T> {
     } catch {
       /* risposta non JSON */
     }
+    // A 401 from the login endpoint itself just means "wrong credentials" -
+    // only a 401 from every other (now session-gated) endpoint means the
+    // stored session is missing/expired, in which case send the user back
+    // to the login page instead of leaving every page stuck on a generic
+    // "Not authenticated" error state.
+    if (res.status === 401 && path !== "/api/auth/login" && typeof window !== "undefined") {
+      setAuthToken(null);
+      if (window.location.pathname !== "/") window.location.assign("/");
+    }
     throw new ApiError(detail, res.status);
   }
 

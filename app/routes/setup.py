@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 from datetime import date
 from typing import Dict, Any, Optional
 from app.database import get_db
+from app.security import get_current_admin
 from app.services.setup import SetupService
 from app.schemas import (
     FileUploadResponse,
@@ -16,7 +17,7 @@ from app.schemas import (
 import logging
 
 logger = logging.getLogger(__name__)
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(get_current_admin)])
 
 # Single service instance holding the in-progress setup wizard state.
 # v1 is single-tenant/admin-only (one setup flow at a time), so a module-level

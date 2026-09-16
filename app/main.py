@@ -14,11 +14,15 @@ app = FastAPI(
     debug=settings.DEBUG
 )
 
-# CORS middleware
+# CORS middleware. allow_credentials is False because auth is a bearer
+# token in the Authorization header (see app/security.py), not a cookie -
+# "*" + credentialed CORS is both unnecessary and a browser-rejected/unsafe
+# combination, so don't turn allow_credentials back on without switching to
+# cookie-based sessions first.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # TODO: restrict in production
-    allow_credentials=True,
+    allow_origins=settings.CORS_ORIGINS,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )

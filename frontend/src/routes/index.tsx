@@ -82,13 +82,6 @@ function LoginPage() {
           <Button type="submit" variant="primary" className="w-full" disabled={loading}>
             {loading ? "Accesso in corso…" : "Entra"}
           </Button>
-          <button
-            type="button"
-            onClick={() => navigate({ to: "/menu" })}
-            className="w-full text-center text-[11px] font-medium text-muted-foreground underline-offset-2 hover:underline"
-          >
-            Continua senza autenticazione
-          </button>
         </form>
       </div>
     </div>

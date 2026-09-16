@@ -1,4 +1,5 @@
 import os
+from typing import List
 from pydantic_settings import BaseSettings
 
 
@@ -11,7 +12,13 @@ class Settings(BaseSettings):
     # API
     API_TITLE: str = "Calendario Docenti API"
     API_VERSION: str = "0.1.0"
-    DEBUG: bool = True
+    DEBUG: bool = False
+
+    # CORS - the frontend sends its bearer token via the Authorization header
+    # (see frontend/src/lib/api.ts), not cookies, so credentialed CORS isn't
+    # needed here. "*" matches every origin; restrict via env for a real
+    # deployment, e.g. CORS_ORIGINS='["https://orario.miascuola.it"]'.
+    CORS_ORIGINS: List[str] = ["*"]
 
     # Solver
     SOLVER_TIMEOUT_SECONDS: int = 60

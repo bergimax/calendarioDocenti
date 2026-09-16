@@ -1,5 +1,8 @@
 """
-Password hashing and session token helpers for the admin login (app/routes/auth.py).
+Password hashing and session helpers for the admin login (app/routes/auth.py)
+and for gating every other router behind get_current_admin (see its use as
+an APIRouter-level `dependencies=[Depends(get_current_admin)]` in
+setup/availability/schedule/chat/dati - app/routes/*.py).
 
 Uses PBKDF2-HMAC-SHA256 from the standard library instead of an extra
 dependency (bcrypt/passlib) - this is a single-admin MVP, not a
@@ -9,6 +12,14 @@ multi-tenant system, so stdlib hashing is a reasonable fit.
 import hashlib
 import hmac
 import secrets
+from datetime import datetime
+from typing import Optional
+
+from fastapi import Depends, Header, HTTPException
+from sqlalchemy.orm import Session
+
+from app.database import get_db
+from app.models import Admin, AdminSession
 
 _PBKDF2_ITERATIONS = 260_000
 
@@ -34,3 +45,24 @@ def verify_password(password: str, stored: str) -> bool:
 
 def generate_session_token() -> str:
     return secrets.token_urlsafe(32)
+
+
+def extract_bearer_token(authorization: Optional[str]) -> Optional[str]:
+    if not authorization or not authorization.lower().startswith("bearer "):
+        return None
+    return authorization.split(" ", 1)[1].strip()
+
+
+def get_current_admin(
+    authorization: Optional[str] = Header(None), db: Session = Depends(get_db)
+) -> Admin:
+    """FastAPI dependency that every protected router requires - raises 401
+    unless the request carries a live (non-expired) session token."""
+    token = extract_bearer_token(authorization)
+    session = db.query(AdminSession).filter(AdminSession.token == token).first() if token else None
+    if not session or session.expires_at < datetime.utcnow():
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    admin = db.query(Admin).filter(Admin.id == session.admin_id).first()
+    if not admin:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return admin
