@@ -78,7 +78,7 @@ class ScheduleContext:
     assegnazioni: List[AssegnazioneDati]
     disponibilita_map: Dict[str, DisponibilitaDati]  # docente_id -> DisponibilitaDati
     calendario: List[CalendarioDati]  # 5 days of week
-    classi_accoppiate: List[Tuple[str, str, str]]  # (classe_a_id, classe_b_id, materia_id)
+    classi_accoppiate: List[Tuple[str, str, str, Optional[str]]]  # (classe_a_id, classe_b_id, materia_id, docente_id)
 
     # Derived
     docenti_map: Dict[str, str]  # docente_id -> docente_tipo
@@ -252,39 +252,42 @@ class ScheduleSolver:
             return False
         return True
 
-    def _shared_docenti_pairs(
-        self, classe_a: str, classe_b: str, materia_id: str
-    ) -> List[Tuple["AssegnazioneDati", "AssegnazioneDati"]]:
+    def _paired_assignment_pair(
+        self, classe_a: str, classe_b: str, materia_id: str, docente_id: Optional[str]
+    ) -> Optional[Tuple["AssegnazioneDati", "AssegnazioneDati"]]:
         """
-        For a classe-accoppiata (classe_a, classe_b, materia_id), find every
-        docente who has an assegnazione to BOTH sides for that materia - i.e.
-        actually runs a joint lesson for this pair, not just any one docente
-        from each side. A real accoppiamento's classes still have most of
-        their hours taught independently by their *other* docenti (who only
-        teach one side); only the docenti genuinely shared between both
-        should ever be forced to move together.
+        A classe-accoppiata row names the SPECIFIC docente who actually runs
+        the joint lesson for that pair (see ClasseAccoppiata's docstring) -
+        this finds that one docente's own assegnazione on each side. Returns
+        None if the row has no docente_id (a legacy/manually-created row
+        without one isn't enforced - we don't know who the joint teacher
+        is) or that docente doesn't actually have an assegnazione on both
+        sides.
         """
-        asgs_a = {a.docente_id: a for a in self.context.assegnazioni
-                  if a.classe_id == classe_a and a.materia_id == materia_id}
-        asgs_b = {a.docente_id: a for a in self.context.assegnazioni
-                  if a.classe_id == classe_b and a.materia_id == materia_id}
-        return [(asgs_a[docente_id], asgs_b[docente_id]) for docente_id in asgs_a.keys() & asgs_b.keys()]
+        if not docente_id:
+            return None
+        asg_a = next((a for a in self.context.assegnazioni if a.classe_id == classe_a
+                      and a.materia_id == materia_id and a.docente_id == docente_id), None)
+        asg_b = next((a for a in self.context.assegnazioni if a.classe_id == classe_b
+                      and a.materia_id == materia_id and a.docente_id == docente_id), None)
+        return (asg_a, asg_b) if asg_a and asg_b else None
 
     def _paired_assignment_ids_to_dedupe(self) -> Set[str]:
         """
-        _constraint_paired_classes forces a shared docente's two assegnazioni
-        (one per side of the pair) to always be equal (x_a == x_b): together
-        they represent a single joint lesson, not two separate bookings.
-        Without this, _constraint_no_double_booking would sum both into the
-        same docente/giorno/ora slot and force the pair to always be 0
-        (sum <= 1 vs. x_a == x_b == 1 is unsatisfiable). Returns the
-        assegnazione_ids of the "B" side of every such pair, to be excluded
-        from that sum.
+        _constraint_paired_classes forces the shared docente's two
+        assegnazioni (one per side of the pair) to always be equal
+        (x_a == x_b): together they represent a single joint lesson, not two
+        separate bookings. Without this, _constraint_no_double_booking would
+        sum both into the same docente/giorno/ora slot and force the pair to
+        always be 0 (sum <= 1 vs. x_a == x_b == 1 is unsatisfiable). Returns
+        the assegnazione_ids of the "B" side of every such pair, to be
+        excluded from that sum.
         """
         skip_ids: Set[str] = set()
-        for classe_a, classe_b, materia_id in self.context.classi_accoppiate:
-            for _asg_a, asg_b in self._shared_docenti_pairs(classe_a, classe_b, materia_id):
-                skip_ids.add(asg_b.assegnazione_id)
+        for classe_a, classe_b, materia_id, docente_id in self.context.classi_accoppiate:
+            pair = self._paired_assignment_pair(classe_a, classe_b, materia_id, docente_id)
+            if pair:
+                skip_ids.add(pair[1].assegnazione_id)
         return skip_ids
 
     def _constraint_no_double_booking(self) -> None:
@@ -401,21 +404,25 @@ class ScheduleSolver:
 
     def _constraint_paired_classes(self) -> None:
         """
-        Hard constraint 3: for a classe-accoppiata, only the docente(i) who
-        actually teach BOTH sides must have matching giorno/ora (one joint
-        lesson). A docente who only teaches one side of the pair is
-        unaffected - most of a paired class's day is still independent,
-        normal lessons with its *other* docenti; see _shared_docenti_pairs.
+        Hard constraint 3: for a classe-accoppiata, only its named docente
+        (the one who actually teaches BOTH sides, see ClasseAccoppiata's
+        docstring) must have matching giorno/ora (one joint lesson). Every
+        other docente of either class is unaffected - most of a paired
+        class's day is still independent, normal lessons with its *other*
+        docenti; see _paired_assignment_pair.
         """
-        for classe_a, classe_b, materia_id in self.context.classi_accoppiate:
-            for asg_a, asg_b in self._shared_docenti_pairs(classe_a, classe_b, materia_id):
-                for giorno in range(5):
-                    for ora in range(6):
-                        key_a = (asg_a.assegnazione_id, giorno, ora)
-                        key_b = (asg_b.assegnazione_id, giorno, ora)
+        for classe_a, classe_b, materia_id, docente_id in self.context.classi_accoppiate:
+            pair = self._paired_assignment_pair(classe_a, classe_b, materia_id, docente_id)
+            if not pair:
+                continue
+            asg_a, asg_b = pair
+            for giorno in range(5):
+                for ora in range(6):
+                    key_a = (asg_a.assegnazione_id, giorno, ora)
+                    key_b = (asg_b.assegnazione_id, giorno, ora)
 
-                        if key_a in self.x and key_b in self.x:
-                            self.model.Add(self.x[key_a] == self.x[key_b])
+                    if key_a in self.x and key_b in self.x:
+                        self.model.Add(self.x[key_a] == self.x[key_b])
 
     def _constraint_teacher_availability(self) -> None:
         """Hard constraint 4: Respect teacher availability + ASSUNTO 8-14 range."""
@@ -914,11 +921,15 @@ class ScheduleSolver:
                     logger.warning(f"Assegnazione {assegnazione_id} not found")
                     continue
 
-                # Check if accoppiata
+                # Check if accoppiata - only for the specific docente named on
+                # the accoppiamento row, not any docente of that classe (see
+                # ClasseAccoppiata's docstring: most of a paired class's hours
+                # are still normal, independent lessons with its other docenti).
                 accoppiata = False
                 classe_accoppiata_id = None
-                for c_a, c_b, mat in self.context.classi_accoppiate:
-                    if asg.classe_id in [c_a, c_b] and asg.materia_id == mat:
+                for c_a, c_b, mat, doc_id in self.context.classi_accoppiate:
+                    if (asg.classe_id in (c_a, c_b) and asg.materia_id == mat
+                            and doc_id == asg.docente_id):
                         accoppiata = True
                         classe_accoppiata_id = c_b if asg.classe_id == c_a else c_a
                         break

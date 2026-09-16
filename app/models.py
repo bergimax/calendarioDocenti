@@ -169,7 +169,18 @@ class DisponibilitaSettimanale(Base):
 
 
 class ClasseAccoppiata(Base):
-    """Paired classes for joint lessons."""
+    """
+    Paired classes for a joint lesson. docente_id names the SPECIFIC teacher
+    who actually runs the joint lesson for this pair - not every docente who
+    happens to teach both classes at some point during the week is one (see
+    app/domain/solver.py's _constraint_paired_classes for why that
+    distinction matters: most of a pair's hours are still normal,
+    independent lessons with each class's *other* docenti). A class combined
+    with more than one other class (e.g. four classes always taught
+    together as one group) is recorded as one row per pair per docente
+    (see scripts/rederive_monte_ore_and_pairings.py), not a single N-way row
+    - the schema only models two classes at a time.
+    """
     __tablename__ = "classe_accoppiata"
 
     id = Column(String, primary_key=True, default=lambda: str(__import__('uuid').uuid4()))
@@ -177,6 +188,7 @@ class ClasseAccoppiata(Base):
     classe_a_id = Column(String, ForeignKey("classe.id"), nullable=False)
     classe_b_id = Column(String, ForeignKey("classe.id"), nullable=False)
     materia_id = Column(String, ForeignKey("materia.id"), nullable=False)
+    docente_id = Column(String, ForeignKey("docente.id"), nullable=True)
     note = Column(Text, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
 

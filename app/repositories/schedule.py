@@ -129,7 +129,7 @@ class ScheduleRepository:
         # 4. Get paired classes
         classi_accoppiate_list = self.db.query(ClasseAccoppiata).filter_by(scuola_id=scuola_id).all()
         classi_accoppiate = [
-            (ca.classe_a_id, ca.classe_b_id, ca.materia_id)
+            (ca.classe_a_id, ca.classe_b_id, ca.materia_id, ca.docente_id)
             for ca in classi_accoppiate_list
         ]
 
