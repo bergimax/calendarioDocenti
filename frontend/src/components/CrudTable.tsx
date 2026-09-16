@@ -34,6 +34,7 @@ export function CrudTable<T extends Record<string, unknown>>({
 }) {
   const [draft, setDraft] = useState<Record<string, string>>({});
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [confirmingId, setConfirmingId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<unknown>(null);
 
@@ -67,7 +68,7 @@ export function CrudTable<T extends Record<string, unknown>>({
   }
 
   async function remove(id: string) {
-    if (!window.confirm("Confermi la rimozione?")) return;
+    setConfirmingId(null);
     setActionError(null);
     try {
       await api(`${endpoint}/${id}`, { method: "DELETE" });
@@ -116,25 +117,47 @@ export function CrudTable<T extends Record<string, unknown>>({
                       </td>
                     ))}
                     <td className="border-b border-edge px-3 py-2 text-right">
-                      <button
-                        type="button"
-                        className="mr-3 font-semibold text-brand"
-                        onClick={() => {
-                          setEditingId(id);
-                          const next: Record<string, string> = {};
-                          for (const [k, v] of Object.entries(row)) next[k] = String(v ?? "");
-                          setDraft(next);
-                        }}
-                      >
-                        Modifica
-                      </button>
-                      <button
-                        type="button"
-                        className="font-semibold text-conflict"
-                        onClick={() => void remove(id)}
-                      >
-                        Rimuovi
-                      </button>
+                      {confirmingId === id ? (
+                        <span className="inline-flex items-center gap-2">
+                          <span className="text-muted-foreground">Confermi?</span>
+                          <button
+                            type="button"
+                            className="font-semibold text-conflict"
+                            onClick={() => void remove(id)}
+                          >
+                            Sì
+                          </button>
+                          <button
+                            type="button"
+                            className="font-semibold text-muted-foreground"
+                            onClick={() => setConfirmingId(null)}
+                          >
+                            Annulla
+                          </button>
+                        </span>
+                      ) : (
+                        <>
+                          <button
+                            type="button"
+                            className="mr-3 font-semibold text-brand"
+                            onClick={() => {
+                              setEditingId(id);
+                              const next: Record<string, string> = {};
+                              for (const [k, v] of Object.entries(row)) next[k] = String(v ?? "");
+                              setDraft(next);
+                            }}
+                          >
+                            Modifica
+                          </button>
+                          <button
+                            type="button"
+                            className="font-semibold text-conflict"
+                            onClick={() => setConfirmingId(id)}
+                          >
+                            Rimuovi
+                          </button>
+                        </>
+                      )}
                     </td>
                   </tr>
                 );
