@@ -681,7 +681,7 @@ function ChatPanel({
       );
     } catch (err) {
       setMessages((m) => [
-        ...m,
+        ...m.map((msg, i) => (i === m.length - 1 && msg.streaming ? { ...msg, streaming: false } : msg)),
         { role: "ai", text: `Copilota non disponibile: ${apiErrorMessage(err)}` },
       ]);
     } finally {

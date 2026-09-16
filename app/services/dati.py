@@ -163,16 +163,18 @@ class SchoolDataService:
         asg = Assegnazione(
             scuola_id=scuola_id, docente_id=docente_id, classe_id=classe_id, materia_id=materia_id,
         )
-        self.db.add(asg)
-        self.db.flush()
-
         monte = MonteOreAnnuale(
             scuola_id=scuola_id, docente_id=docente_id, classe_id=classe_id, materia_id=materia_id,
             ore_totali=_int_or(data.get("ore_totali"), 0),
             ore_erogate=_int_or(data.get("ore_erogate"), 0),
         )
+        self.db.add(asg)
         self.db.add(monte)
-        self.db.commit()
+        try:
+            self.db.commit()
+        except IntegrityError:
+            self.db.rollback()
+            raise ValueError("docente_id, classe_id or materia_id does not reference an existing record")
         return self._assegnazione_dict(asg)
 
     def update_assegnazione(self, scuola_id: str, assignment_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
@@ -257,7 +259,11 @@ class SchoolDataService:
             note=(data.get("note") or "").strip() or None,
         )
         self.db.add(pairing)
-        self.db.commit()
+        try:
+            self.db.commit()
+        except IntegrityError:
+            self.db.rollback()
+            raise ValueError("classe_a_id, classe_b_id or materia_id does not reference an existing record")
         return self._accoppiamento_dict(pairing)
 
     def update_accoppiamento(self, scuola_id: str, pairing_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
