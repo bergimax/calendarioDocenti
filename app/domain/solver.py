@@ -115,7 +115,7 @@ class SoftPenalty:
     """
     var: Any  # cp_model IntVar; > 0 in the solution means this is violated
     weight: int
-    kind: str  # "teoria_consecutive" | "ore_target_deviation" | "contractor_gap"
+    kind: str  # "teoria_consecutive" | "ore_target_deviation" | "contractor_gap" | "free_hours"
     description: str
     classe_id: Optional[str] = None
     docente_id: Optional[str] = None
@@ -308,6 +308,14 @@ class ScheduleSolver:
         (gruppo=None, e.g. a plain CSV calendar or an inferred closure), then
         to a hardcoded default if neither exists.
         """
+        # A classe in stage that day has 0 lesson hours regardless of what
+        # the calendar's normal ore_max_giornata says - _constraint_day_capacity
+        # now requires an exact match (not just <=), so this has to agree with
+        # _constraint_exclude_stage or the two would be jointly infeasible.
+        for c in self.context.calendario:
+            if c.giorno == giorno and c.flag_stage_classe_id == classe_id:
+                return 0
+
         gruppo = self.context.classi_gruppo.get(classe_id)
 
         if gruppo is not None:
@@ -322,7 +330,13 @@ class ScheduleSolver:
         return 6  # no calendar data at all for this day: default
 
     def _constraint_day_capacity(self) -> None:
-        """Hard constraint 2: Per-class daily hours <= ore_max_giornata."""
+        """Hard constraint 2: Per-class daily hours <= ore_max_giornata (can
+        never exceed the calendar's cap - physically impossible, not just
+        undesirable). Getting close to *no* free/"Libera" hours - as close as
+        the current docenti/ore actually allow - is instead a soft goal, see
+        _soft_no_free_hours: even the real historical example timetable
+        (Documenti/es_di_calendario.pdf) was only ~96% full, so treating full
+        coverage as hard would make generation fail outright on real data."""
         # Group assegnazioni by classe
         classi_asgs = {}
         for asg in self.context.assegnazioni:
@@ -514,16 +528,76 @@ class ScheduleSolver:
         # Soft 4: Minimize ore buche for contrattisti (weight 12)
         self._soft_contractor_gaps()
 
+        # Soft 5: Minimize free/"Libera" hours (weight 100 - dominant over
+        # every other soft goal above, see _soft_no_free_hours)
+        self._soft_no_free_hours()
+
+    def _soft_no_free_hours(self) -> None:
+        """
+        Soft: minimize empty ("Libera") hours per classe/giorno, weighted far
+        above every other soft goal (100 vs. the 8-15 range above) so the
+        solver always tries to fill a class's day before optimizing anything
+        else - the closest a hard "no free hours" constraint gets without
+        risking outright infeasibility (see _constraint_day_capacity's
+        docstring: even the real historical example timetable was only
+        ~96% full, so a true hard constraint fails to generate at all on
+        real data).
+        """
+        weight = 100
+
+        classi_asgs: Dict[str, List[AssegnazioneDati]] = {}
+        for asg in self.context.assegnazioni:
+            classi_asgs.setdefault(asg.classe_id, []).append(asg)
+
+        for classe_id, asgs in classi_asgs.items():
+            classe_nome = asgs[0].classe_nome
+            for giorno in range(5):
+                ore_max = self._ore_max_for_classe_giorno(classe_id, giorno)
+                if ore_max <= 0:
+                    continue
+
+                hours_in_day = [
+                    self.x[(asg.assegnazione_id, giorno, ora)]
+                    for asg in asgs
+                    for ora in range(6)
+                    if (asg.assegnazione_id, giorno, ora) in self.x
+                ]
+                if not hours_in_day:
+                    continue
+
+                free_hours = self.model.NewIntVar(0, ore_max, f"free_hours_{classe_id}_{giorno}")
+                self.model.Add(free_hours >= ore_max - sum(hours_in_day))
+                self.soft_penalties.append(SoftPenalty(
+                    var=free_hours, weight=weight, kind="free_hours",
+                    description=(
+                        f"Ore libere per {classe_nome} ({GIORNI_NOMI_IT[GiornoEnum(giorno).name]})"
+                    ),
+                    classe_id=classe_id, giorno=giorno,
+                ))
+
     def _soft_teoria_consecutive(self) -> None:
-        """Soft: Theory max 2 consecutive hours."""
+        """
+        Soft: max 2 consecutive theory hours from the SAME docente.
+
+        Scoped per (classe, docente) rather than per classe: with every
+        assegnazione currently sharing one placeholder Materia (real subject
+        data isn't in yet), grouping by classe alone summed every docente's
+        hours into the same window and effectively forbade filling more than
+        ~2 hours of any of a class's day at all, docente changes included -
+        a teacher handoff is its own natural break, the same as a subject
+        change would be, so it shouldn't count toward the same run.
+        """
         weight = 10
 
-        # Group asgs by materia_tipo = TEORIA
         teoria_asgs = [asg for asg in self.context.assegnazioni if asg.materia_tipo == "TEORIA"]
 
-        for classe_id in self.context.classi_set:
-            classe_teoria = [asg for asg in teoria_asgs if asg.classe_id == classe_id]
-            classe_nome = classe_teoria[0].classe_nome if classe_teoria else classe_id
+        by_classe_docente: Dict[Tuple[str, str], List[AssegnazioneDati]] = {}
+        for asg in teoria_asgs:
+            by_classe_docente.setdefault((asg.classe_id, asg.docente_id), []).append(asg)
+
+        for (classe_id, docente_id), asgs in by_classe_docente.items():
+            classe_nome = asgs[0].classe_nome
+            docente_nome = asgs[0].docente_nome
 
             # Base cap: 2, unless the chat asked for a specific value
             # ("imposta massimo 3 ore consecutive di teoria").
@@ -541,22 +615,24 @@ class ScheduleSolver:
                     # Sum hours in window: ora_start, ora_start+1, ora_start+2
                     hours_in_window = [
                         self.x[(asg.assegnazione_id, giorno, ora_start + h)]
-                        for asg in classe_teoria
+                        for asg in asgs
                         for h in range(3)
                         if (asg.assegnazione_id, giorno, ora_start + h) in self.x
                     ]
 
                     if hours_in_window:
                         # Penalize if hours in window exceed the cap
-                        excess = self.model.NewIntVar(0, 3, f"excess_teoria_{classe_id}_{giorno}_{ora_start}")
+                        excess = self.model.NewIntVar(
+                            0, 3, f"excess_teoria_{classe_id}_{docente_id}_{giorno}_{ora_start}"
+                        )
                         self.model.Add(excess >= sum(hours_in_window) - max_consecutive)
                         self.soft_penalties.append(SoftPenalty(
                             var=excess, weight=weight, kind="teoria_consecutive",
                             description=(
-                                f"Troppe ore di teoria consecutive per {classe_nome} "
+                                f"Troppe ore consecutive di {docente_nome} su {classe_nome} "
                                 f"({GIORNI_NOMI_IT[GiornoEnum(giorno).name]})"
                             ),
-                            classe_id=classe_id, giorno=giorno,
+                            classe_id=classe_id, docente_id=docente_id, giorno=giorno,
                             suggested_action={"action_type": "force_3_hours_theory", "label": "Forza 3 ore teoria"},
                         ))
 
