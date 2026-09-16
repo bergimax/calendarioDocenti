@@ -26,7 +26,7 @@ export const Route = createFileRoute("/setup")({
 });
 
 const FILES: { type: FileType; label: string; endpoint: string; accept: string }[] = [
-  { type: "calendario", label: "Calendario PDF", endpoint: "/api/calendar/upload", accept: ".pdf" },
+  { type: "calendario", label: "Calendario PDF", endpoint: "/api/calendar/upload", accept: ".csv,.pdf" },
   { type: "docenti", label: "Docenti CSV", endpoint: "/api/teachers/upload", accept: ".csv" },
   { type: "classi", label: "Classi CSV", endpoint: "/api/classes/upload", accept: ".csv" },
   { type: "materie", label: "Materie CSV", endpoint: "/api/subjects/upload", accept: ".csv" },

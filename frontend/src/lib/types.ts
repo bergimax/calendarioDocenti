@@ -116,8 +116,8 @@ export interface SlotLezione {
   docente_id: string;
   materia_id: string;
   giorno: string;
-  ora_inizio: string;
-  ora_fine: string;
+  ora_inizio: number;
+  ora_fine: number;
   accoppiata?: boolean;
   classe_accoppiata_id?: string;
   materia_tipo?: "TEORIA" | "PRATICA";

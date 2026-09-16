@@ -38,9 +38,7 @@ const GIORNI = [
   { value: "VENERDI", label: "Venerdì" },
 ];
 
-// modify-slot's ora_inizio is a number (8..13), matching backend's
-// SlotLezioneResponse.ora_inizio: int - the option value must be that
-// number too (a string like "08:00" would fail the backend's int(...)).
+// SlotLezioneResponse.ora_inizio is an int (8..13); option values must match.
 const ORE_OPTIONS = [8, 9, 10, 11, 12, 13].map((h) => ({ value: h, label: `${String(h).padStart(2, "0")}:00` }));
 
 const QUICK_ACTIONS = [
@@ -343,8 +341,6 @@ function ScheduleTable({
   for (const s of schedule.slots) {
     // s.giorno comes from the backend as "LUNEDI".."VENERDI" (uppercase);
     // the tab state below is lowercase for the nice capitalize styling.
-    // s.ora_inizio is a number (8, 9, ...) despite the SlotLezione type
-    // saying string - normalize to "08:00" to match the ORE row labels.
     if (s.giorno !== giorno.toUpperCase()) continue;
     const oraKey = `${String(s.ora_inizio).padStart(2, "0")}:00`;
     byCell.set(`${oraKey}|${s.classe_id}`, s);
@@ -577,7 +573,7 @@ function ModifySlotPanel({
           </option>
         ))}
       </Select>
-      <Select label="Ora" value={ora} onChange={(e) => setOra(e.target.value)}>
+      <Select label="Ora" value={ora} onChange={(e) => setOra(Number(e.target.value))}>
         {ORE_OPTIONS.map(({ value, label }) => (
           <option key={value} value={value}>
             {label}
