@@ -1,6 +1,6 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
-import { api, apiErrorMessage } from "@/lib/api";
+import { api, apiErrorMessage, setAuthToken } from "@/lib/api";
 import { Button, Field } from "@/components/ui-kit";
 
 export const Route = createFileRoute("/")({
@@ -34,7 +34,11 @@ function LoginPage() {
     setLoading(true);
     setError(null);
     try {
-      await api("/api/auth/login", { method: "POST", body: { email, password } });
+      const res = await api<{ token: string }>("/api/auth/login", {
+        method: "POST",
+        body: { email, password },
+      });
+      setAuthToken(res.token);
       navigate({ to: "/menu" });
     } catch (err) {
       setError(apiErrorMessage(err));
@@ -83,7 +87,7 @@ function LoginPage() {
             onClick={() => navigate({ to: "/menu" })}
             className="w-full text-center text-[11px] font-medium text-muted-foreground underline-offset-2 hover:underline"
           >
-            Continua senza autenticazione (backend non attivo)
+            Continua senza autenticazione
           </button>
         </form>
       </div>

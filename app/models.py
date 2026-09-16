@@ -263,3 +263,25 @@ class AuditLog(Base):
     admin_id = Column(String, nullable=True)  # Admin who performed action
     dettagli = Column(JSON, nullable=True)
     timestamp = Column(DateTime, server_default=func.now())
+
+
+class Admin(Base):
+    """School admin account (v1: one admin per school - see specs.md scope).
+    Created via scripts/create_admin.py, not through a registration endpoint."""
+    __tablename__ = "admin"
+
+    id = Column(String, primary_key=True, default=lambda: str(__import__('uuid').uuid4()))
+    scuola_id = Column(String, ForeignKey("scuola.id"), nullable=False)
+    email = Column(String(255), unique=True, nullable=False, index=True)
+    password_hash = Column(String, nullable=False)
+    created_at = Column(DateTime, server_default=func.now())
+
+
+class AdminSession(Base):
+    """Opaque bearer session token issued on login, checked by GET /api/auth/me."""
+    __tablename__ = "admin_session"
+
+    token = Column(String, primary_key=True)
+    admin_id = Column(String, ForeignKey("admin.id"), nullable=False)
+    created_at = Column(DateTime, server_default=func.now())
+    expires_at = Column(DateTime, nullable=False)

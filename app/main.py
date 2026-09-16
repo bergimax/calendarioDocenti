@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.database import Base, engine
-from app.routes import availability, setup, schedule, chat, dati
+from app.routes import availability, setup, schedule, chat, dati, auth
 
 # Create tables
 Base.metadata.create_all(bind=engine)
@@ -29,6 +29,7 @@ app.include_router(availability.router, prefix="/api", tags=["availability"])
 app.include_router(schedule.router, prefix="/api", tags=["schedule"])
 app.include_router(chat.router, prefix="/api", tags=["chat"])
 app.include_router(dati.router, prefix="/api", tags=["dati"])
+app.include_router(auth.router, prefix="/api", tags=["auth"])
 
 
 @app.get("/health")

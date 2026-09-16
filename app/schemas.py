@@ -305,3 +305,16 @@ class CalendarioResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class LoginRequest(BaseModel):
+    """Admin login request."""
+    email: str
+    password: str
+
+
+class LoginResponse(BaseModel):
+    """Admin login response - token is sent back as a Bearer token."""
+    status: str
+    token: str
+    email: str

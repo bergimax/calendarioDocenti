@@ -7,6 +7,25 @@
 export const API_BASE_URL =
   (import.meta.env["VITE_API_BASE_URL"] as string | undefined) ?? "";
 
+const AUTH_TOKEN_KEY = "authToken";
+
+export function setAuthToken(token: string | null): void {
+  try {
+    if (token) sessionStorage.setItem(AUTH_TOKEN_KEY, token);
+    else sessionStorage.removeItem(AUTH_TOKEN_KEY);
+  } catch {
+    /* sessionStorage non disponibile (es. modalità privata) */
+  }
+}
+
+function getAuthToken(): string | null {
+  try {
+    return sessionStorage.getItem(AUTH_TOKEN_KEY);
+  } catch {
+    return null;
+  }
+}
+
 export class ApiError extends Error {
   status: number;
   constructor(message: string, status: number) {
@@ -32,6 +51,10 @@ export async function api<T>(path: string, options: Options = {}): Promise<T> {
   } else if (body != null) {
     init.body = JSON.stringify(body);
     init.headers = { "Content-Type": "application/json" };
+  }
+  const token = getAuthToken();
+  if (token) {
+    init.headers = { ...(init.headers as Record<string, string> | undefined), Authorization: `Bearer ${token}` };
   }
 
   let res: Response;
