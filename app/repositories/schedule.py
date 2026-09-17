@@ -112,7 +112,9 @@ class ScheduleRepository:
                     ore_max_giornata=cal.ore_max_giornata,
                     gruppo=cal.gruppo,
                     flag_stage_classe_id=cal.flag_stage_classe_id,
+                    flag_stage_gruppo=cal.flag_stage_gruppo,
                     flag_chiusura=cal.flag_chiusura,
+                    ora_inizio_min=cal.ora_inizio_min,
                 )
                 calendario.append(cal_data)
 
@@ -239,6 +241,50 @@ class ScheduleRepository:
             logger.error(f"Error saving schedule: {e}")
             raise
 
+    _GIORNI_NOMI = ["LUNEDI", "MARTEDI", "MERCOLEDI", "GIOVEDI", "VENERDI"]
+
+    def _stage_cells_for_week(self, scuola_id: str, week_start: date) -> List[dict]:
+        """
+        {classe_id, classe_nome, giorno} entries on stage this week - a
+        whole gruppo via flag_stage_gruppo, or a single classe via
+        flag_stage_classe_id - so schedule renderers can label them "STAGE"
+        instead of "Libera" (they carry no SlotLezione at all, same as any
+        other empty hour) and so a classe on stage every day this week
+        still gets a column (classi_sorted elsewhere is otherwise built
+        only from classi that have >=1 actual slot).
+        """
+        week_end = week_start + timedelta(days=7)
+        calendario = self.db.query(CalendarioAnnuale).filter(
+            and_(
+                CalendarioAnnuale.scuola_id == scuola_id,
+                CalendarioAnnuale.data >= week_start,
+                CalendarioAnnuale.data < week_end,
+            )
+        ).all()
+
+        classi = self.db.query(Classe).filter_by(scuola_id=scuola_id).all()
+        classi_gruppo = {c.id: c.gruppo for c in classi}
+        classi_nome = {c.id: c.nome for c in classi}
+
+        cells = set()
+        for cal in calendario:
+            giorno_idx = (cal.data - week_start).days
+            if not (0 <= giorno_idx < 5):
+                continue
+            giorno_nome = self._GIORNI_NOMI[giorno_idx]
+
+            if cal.flag_stage_classe_id:
+                cells.add((cal.flag_stage_classe_id, giorno_nome))
+            elif cal.flag_stage_gruppo and cal.gruppo:
+                for classe_id, gruppo in classi_gruppo.items():
+                    if gruppo == cal.gruppo:
+                        cells.add((classe_id, giorno_nome))
+
+        return [
+            {"classe_id": cid, "classe_nome": classi_nome.get(cid, cid), "giorno": g}
+            for cid, g in cells
+        ]
+
     def get_schedule_by_week(self, scuola_id: str, week_start: date) -> Optional[dict]:
         """
         Retrieve schedule for week with all related entities.
@@ -287,4 +333,5 @@ class ScheduleRepository:
             "created_at": orario.created_at,
             "approved_at": orario.approved_at,
             "slots": slots,
+            "stage_cells": self._stage_cells_for_week(scuola_id, week_start),
         }

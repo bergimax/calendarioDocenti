@@ -1,6 +1,6 @@
 from sqlalchemy.orm import Session
 from datetime import date
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
 from app.repositories.schedule import ScheduleRepository
 from app.domain.solver import ScheduleSolver
 from app.schemas import ScheduleGenerateResponse, SlotLezioneResponse
@@ -653,6 +653,20 @@ class ScheduleService:
             "pdf_url": f"/api/schedule/{week_start}/export-pdf/file",
         }
 
+    def export_excel(self, scuola_id: str, week_start: date) -> Dict[str, Any]:
+        """Return metadata + a download URL for the week's .xlsx tabellone."""
+        logger.info(f"Exporting schedule to Excel: school {scuola_id} week {week_start}")
+
+        schedule = self.repo.get_schedule_by_week(scuola_id, week_start)
+        if not schedule:
+            return {"status": "error", "message": "No schedule found for this week"}
+
+        return {
+            "status": "generated",
+            "filename": f"orario_{week_start}.xlsx",
+            "xlsx_url": f"/api/schedule/{week_start}/export-excel/file",
+        }
+
     def render_pdf(self, scuola_id: str, week_start: date) -> Optional[bytes]:
         """
         Render the weekly tabellone (classi x ore, one landscape page per
@@ -668,59 +682,229 @@ class ScheduleService:
         html = self._render_tabellone_html(schedule)
         return HTML(string=html).write_pdf()
 
+    def render_excel(self, scuola_id: str, week_start: date) -> Optional[bytes]:
+        """
+        Render the weekly tabellone as an .xlsx workbook, one sheet per
+        giorno - same classi x ore layout and joint-lesson merging as the
+        PDF, but without the PDF's fixed A4-landscape width: with 20+ classi
+        columns the PDF page can't fit them all and cuts columns off,
+        whereas a spreadsheet just scrolls. Returns None if no schedule
+        exists for this week.
+        """
+        schedule = self.repo.get_schedule_by_week(scuola_id, week_start)
+        if not schedule:
+            return None
+
+        from io import BytesIO
+        from openpyxl import Workbook
+        from openpyxl.styles import Alignment, Font, PatternFill
+        from openpyxl.utils import get_column_letter
+
+        slots = schedule["slots"]
+        stage_cells_list = schedule.get("stage_cells") or []
+
+        classi = {}
+        for s in slots:
+            classi.setdefault(s["classe_id"], s.get("classe_nome") or s["classe_id"])
+        for sc in stage_cells_list:
+            classi.setdefault(sc["classe_id"], sc.get("classe_nome") or sc["classe_id"])
+        classi_sorted = sorted(classi.items(), key=lambda c: c[1])
+        classe_index = {classe_id: i for i, (classe_id, _) in enumerate(classi_sorted)}
+
+        by_cell = {(s["giorno"], s["ora_inizio"], s["classe_id"]): s for s in slots}
+        stage_set = {(sc["classe_id"], sc["giorno"]) for sc in stage_cells_list}
+
+        header_fill = PatternFill("solid", fgColor="EEEEEE")
+        teoria_fill = PatternFill("solid", fgColor="EAF2FF")
+        pratica_fill = PatternFill("solid", fgColor="EAFBEA")
+        stage_fill = PatternFill("solid", fgColor="FDF1E0")
+        stage_font = Font(bold=True, color="8A5A00")
+        libera_font = Font(italic=True, color="999999")
+        wrap = Alignment(wrap_text=True, vertical="center")
+
+        wb = Workbook()
+        wb.remove(wb.active)
+
+        for giorno, label in self._GIORNI_LABELS.items():
+            ws = wb.create_sheet(label)
+            ws.freeze_panes = "B2"
+            ws.cell(row=1, column=1, value="Ora").fill = header_fill
+            for j, (_, classe_nome) in enumerate(classi_sorted, start=2):
+                cell = ws.cell(row=1, column=j, value=classe_nome)
+                cell.fill = header_fill
+                cell.font = Font(bold=True)
+                cell.alignment = wrap
+                ws.column_dimensions[get_column_letter(j)].width = 16
+
+            for i, ora in enumerate(self._ORE, start=2):
+                ws.cell(row=i, column=1, value=f"{ora}:00").font = Font(bold=True)
+
+                cell_slots = {
+                    classe_id: by_cell[(giorno, ora, classe_id)]
+                    for classe_id, _ in classi_sorted
+                    if (giorno, ora, classe_id) in by_cell
+                }
+                group_of = self._group_classi_for_hour(cell_slots)
+
+                skip: set = set()
+                for classe_id, _ in classi_sorted:
+                    if classe_id in skip:
+                        continue
+                    col = classe_index[classe_id] + 2
+                    if (classe_id, giorno) in stage_set:
+                        cell = ws.cell(row=i, column=col, value="STAGE")
+                        cell.fill = stage_fill
+                        cell.font = stage_font
+                        cell.alignment = Alignment(horizontal="center", vertical="center")
+                        continue
+                    slot = cell_slots.get(classe_id)
+                    if not slot:
+                        cell = ws.cell(row=i, column=col, value="Libera")
+                        cell.font = libera_font
+                        continue
+
+                    group = group_of[classe_id]
+                    span = 1
+                    if len(group) > 1:
+                        indices = sorted(classe_index[c] for c in group)
+                        contiguous = indices == list(range(indices[0], indices[-1] + 1))
+                        if contiguous:
+                            span = len(group)
+                            skip.update(c for c in group if c != classe_id)
+
+                    cell = ws.cell(
+                        row=i, column=col, value=slot.get("docente_nome") or slot["docente_id"]
+                    )
+                    cell.fill = pratica_fill if slot.get("materia_tipo") == "PRATICA" else teoria_fill
+                    cell.alignment = wrap
+                    if span > 1:
+                        ws.merge_cells(start_row=i, start_column=col, end_row=i, end_column=col + span - 1)
+
+            ws.row_dimensions[1].height = 30
+
+        buf = BytesIO()
+        wb.save(buf)
+        return buf.getvalue()
+
     _GIORNI_LABELS = {
         "LUNEDI": "Lunedì", "MARTEDI": "Martedì", "MERCOLEDI": "Mercoledì",
         "GIOVEDI": "Giovedì", "VENERDI": "Venerdì",
     }
     _ORE = range(8, 14)
 
+    @staticmethod
+    def _group_classi_for_hour(cell_slots: Dict[str, Dict[str, Any]]) -> Dict[str, List[str]]:
+        """
+        Union classi that share one joint lesson this hour, following each
+        slot's classe_accoppiata_id edge. A joint lesson can span more than
+        2 classi (see ClasseAccoppiata's docstring: a 4-way group is stored
+        as one row per pair), so any single classe's own edge only names
+        one partner - the full group is the transitive closure of every
+        edge present this hour, not just one skipped partner.
+        Returns classe_id -> full group (including itself), for every
+        classe_id in cell_slots.
+        """
+        parent = {c: c for c in cell_slots}
+
+        def find(x: str) -> str:
+            while parent[x] != x:
+                x = parent[x]
+            return x
+
+        for classe_id, slot in cell_slots.items():
+            partner = slot.get("classe_accoppiata_id")
+            if slot.get("accoppiata") and partner in parent:
+                ra, rb = find(classe_id), find(partner)
+                if ra != rb:
+                    parent[ra] = rb
+
+        groups: Dict[str, List[str]] = {}
+        for classe_id in cell_slots:
+            groups.setdefault(find(classe_id), []).append(classe_id)
+
+        return {classe_id: groups[find(classe_id)] for classe_id in cell_slots}
+
     def _render_tabellone_html(self, schedule: Dict[str, Any]) -> str:
         from html import escape
 
         slots = schedule["slots"]
+        stage_cells_list = schedule.get("stage_cells") or []
 
         classi = {}
         for s in slots:
             classi.setdefault(s["classe_id"], s.get("classe_nome") or s["classe_id"])
+        for sc in stage_cells_list:
+            classi.setdefault(sc["classe_id"], sc.get("classe_nome") or sc["classe_id"])
         classi_sorted = sorted(classi.items(), key=lambda c: c[1])
+        classe_index = {classe_id: i for i, (classe_id, _) in enumerate(classi_sorted)}
 
         by_cell = {(s["giorno"], s["ora_inizio"], s["classe_id"]): s for s in slots}
+        stage_set = {(sc["classe_id"], sc["giorno"]) for sc in stage_cells_list}
 
         pages = []
         for giorno in self._GIORNI_LABELS:
             rows_html = []
             for ora in self._ORE:
+                cell_slots = {
+                    classe_id: by_cell[(giorno, ora, classe_id)]
+                    for classe_id, _ in classi_sorted
+                    if (giorno, ora, classe_id) in by_cell
+                }
+                group_of = self._group_classi_for_hour(cell_slots)
+
                 skip: set = set()
                 cells = [f'<td class="ora">{ora}:00</td>']
                 for classe_id, classe_nome in classi_sorted:
                     if classe_id in skip:
                         continue
-                    slot = by_cell.get((giorno, ora, classe_id))
+                    if (classe_id, giorno) in stage_set:
+                        cells.append('<td class="stage">STAGE</td>')
+                        continue
+                    slot = cell_slots.get(classe_id)
                     if not slot:
                         cells.append('<td class="libera">Libera</td>')
                         continue
 
+                    group = group_of[classe_id]
                     colspan = 1
-                    if slot.get("accoppiata") and slot.get("classe_accoppiata_id"):
-                        skip.add(slot["classe_accoppiata_id"])
-                        colspan = 2
+                    if len(group) > 1:
+                        indices = sorted(classe_index[c] for c in group)
+                        contiguous = indices == list(range(indices[0], indices[-1] + 1))
+                        # Only mergeable if the group forms an unbroken run
+                        # of columns; otherwise fall back to one cell per
+                        # classe rather than risk an invalid colspan.
+                        if contiguous:
+                            colspan = len(group)
+                            skip.update(c for c in group if c != classe_id)
 
                     tone = "pratica" if slot.get("materia_tipo") == "PRATICA" else "teoria"
-                    materia = escape(slot.get("materia_nome") or slot["materia_id"])
                     docente = escape(slot.get("docente_nome") or slot["docente_id"])
                     cells.append(
                         f'<td class="{tone}" colspan="{colspan}">'
-                        f'<strong>{materia}</strong><span class="docente">{docente}</span>'
+                        f'<span class="docente">{docente}</span>'
                         f'</td>'
                     )
                 rows_html.append(f"<tr>{''.join(cells)}</tr>")
 
             header_cells = "".join(f"<th>{escape(nome)}</th>" for _, nome in classi_sorted)
+            # table-layout:fixed needs explicit column widths (from a
+            # colgroup, since it stops sizing columns from cell content) or
+            # a wide roster - e.g. this school's 17 classi - overflows the
+            # printable A4-landscape width and the rightmost classi are cut
+            # off the page entirely.
+            n_classi = max(len(classi_sorted), 1)
+            ora_pct = min(8, 100 / (n_classi + 1))
+            classe_pct = (100 - ora_pct) / n_classi
+            colgroup = (
+                f'<col style="width:{ora_pct}%">'
+                + f'<col style="width:{classe_pct}%">' * n_classi
+            )
             pages.append(f"""
                 <div class="day-page">
                   <h1>Orario settimanale</h1>
                   <h2>{self._GIORNI_LABELS[giorno]} &middot; settimana dal {escape(str(schedule["week_start"]))}</h2>
                   <table>
+                    <colgroup>{colgroup}</colgroup>
                     <thead><tr><th>Ora</th>{header_cells}</tr></thead>
                     <tbody>{''.join(rows_html)}</tbody>
                   </table>
@@ -736,14 +920,18 @@ class ScheduleService:
   body {{ font-family: Helvetica, Arial, sans-serif; font-size: 9pt; color: #111; margin: 0; }}
   h1 {{ font-size: 14pt; margin: 0 0 2mm 0; }}
   h2 {{ font-size: 11pt; margin: 0 0 4mm 0; color: #444; font-weight: normal; }}
-  table {{ width: 100%; border-collapse: collapse; }}
-  th, td {{ border: 0.5pt solid #999; padding: 2mm; text-align: left; vertical-align: top; }}
-  th {{ background: #eee; font-size: 8pt; text-transform: uppercase; }}
-  td.ora {{ font-weight: bold; white-space: nowrap; width: 14mm; }}
+  table {{ width: 100%; table-layout: fixed; border-collapse: collapse; }}
+  th, td {{
+    border: 0.5pt solid #999; padding: 1mm; text-align: left; vertical-align: top;
+    overflow-wrap: break-word; word-break: break-word;
+  }}
+  th {{ background: #eee; font-size: 6.5pt; text-transform: uppercase; }}
+  td.ora {{ font-weight: bold; white-space: nowrap; }}
   td.teoria {{ background: #eaf2ff; }}
   td.pratica {{ background: #eafbea; }}
   td.libera {{ color: #999; font-style: italic; }}
-  .docente {{ display: block; font-size: 7.5pt; color: #555; margin-top: 0.5mm; }}
+  td.stage {{ background: #fdf1e0; color: #8a5a00; font-weight: bold; text-align: center; }}
+  .docente {{ display: block; font-size: 7pt; color: #111; }}
   .day-page {{ page-break-after: always; }}
   .day-page:last-child {{ page-break-after: auto; }}
 </style>

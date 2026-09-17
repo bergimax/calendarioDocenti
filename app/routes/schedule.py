@@ -246,3 +246,56 @@ def download_pdf(
     except Exception as e:
         logger.error(f"Error rendering PDF: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.get("/schedule/{week_start}/export-excel")
+def export_excel(
+    week_start: date,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """
+    Export schedule to Excel tabellone.
+    """
+    scuola_id = _get_current_school_id()
+
+    try:
+        service = ScheduleService(db)
+        result = service.export_excel(
+            scuola_id=scuola_id,
+            week_start=week_start,
+        )
+        return result
+
+    except Exception as e:
+        logger.error(f"Error exporting Excel: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/schedule/{week_start}/export-excel/file")
+def download_excel(
+    week_start: date,
+    db: Session = Depends(get_db),
+) -> Response:
+    """
+    Stream the actual .xlsx tabellone bytes (the URL returned by export-excel).
+    """
+    scuola_id = _get_current_school_id()
+
+    try:
+        service = ScheduleService(db)
+        xlsx_bytes = service.render_excel(scuola_id=scuola_id, week_start=week_start)
+
+        if xlsx_bytes is None:
+            raise HTTPException(status_code=404, detail="No schedule found for this week")
+
+        return Response(
+            content=xlsx_bytes,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f'attachment; filename="orario_{week_start}.xlsx"'},
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error rendering Excel: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")

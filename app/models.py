@@ -123,8 +123,17 @@ class CalendarioAnnuale(Base):
     # when a PDF calendar has different daily hours per year-group).
     gruppo = Column(String(50), nullable=True)
     ore_max_giornata = Column(Integer, default=6)  # 4, 5, or 6
+    # Staggered ingressi: no lesson for this gruppo/classe before this hour
+    # (8-13) on this giorno. NULL = no minimum, may start at 8:00.
+    ora_inizio_min = Column(Integer, nullable=True)
     flag_chiusura = Column(Boolean, default=False)
     flag_stage_classe_id = Column(String, ForeignKey("classe.id"), nullable=True)
+    # Whole year-group on stage (internship) this date - every classe whose
+    # Classe.gruppo matches this row's gruppo gets 0 lesson hours, shown as
+    # "STAGE" instead of a normal (docente-less) empty slot. Distinct from
+    # flag_stage_classe_id, which names one specific classe rather than a
+    # whole gruppo; requires gruppo to be set on this row.
+    flag_stage_gruppo = Column(Boolean, default=False)
     created_at = Column(DateTime, server_default=func.now())
 
     # Relationships

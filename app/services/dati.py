@@ -318,8 +318,10 @@ class SchoolDataService:
             data=data_val,
             gruppo=(data.get("gruppo") or "").strip() or None,
             ore_max_giornata=_int_or(data.get("ore_max_giornata"), 6),
+            ora_inizio_min=_int_or(data.get("ora_inizio_min"), None),
             flag_chiusura=_bool_from_form(data.get("flag_chiusura")),
             flag_stage_classe_id=(data.get("flag_stage_classe_id") or "").strip() or None,
+            flag_stage_gruppo=_bool_from_form(data.get("flag_stage_gruppo")),
         )
         self.db.add(entry)
         self.db.commit()
@@ -338,10 +340,14 @@ class SchoolDataService:
             entry.gruppo = (data.get("gruppo") or "").strip() or None
         if "ore_max_giornata" in data:
             entry.ore_max_giornata = _int_or(data.get("ore_max_giornata"), entry.ore_max_giornata)
+        if "ora_inizio_min" in data:
+            entry.ora_inizio_min = _int_or(data.get("ora_inizio_min"), None)
         if "flag_chiusura" in data:
             entry.flag_chiusura = _bool_from_form(data.get("flag_chiusura"))
         if "flag_stage_classe_id" in data:
             entry.flag_stage_classe_id = (data.get("flag_stage_classe_id") or "").strip() or None
+        if "flag_stage_gruppo" in data:
+            entry.flag_stage_gruppo = _bool_from_form(data.get("flag_stage_gruppo"))
         self.db.commit()
         return self._calendario_dict(entry)
 
@@ -359,6 +365,8 @@ class SchoolDataService:
             "data": c.data.isoformat(),
             "gruppo": c.gruppo,
             "ore_max_giornata": c.ore_max_giornata,
+            "ora_inizio_min": c.ora_inizio_min,
             "flag_chiusura": c.flag_chiusura,
             "flag_stage_classe_id": c.flag_stage_classe_id,
+            "flag_stage_gruppo": c.flag_stage_gruppo,
         }

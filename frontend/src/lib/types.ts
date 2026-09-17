@@ -105,9 +105,12 @@ export interface ClassPairing {
 export interface CalendarEntry {
   date_id: string;
   data: string;
+  gruppo?: string | null;
   ore_max_giornata: 4 | 5 | 6;
+  ora_inizio_min?: number | null;
   flag_chiusura: boolean;
   flag_stage_classe_id?: string | null;
+  flag_stage_gruppo?: boolean;
 }
 
 export interface SlotLezione {
@@ -147,6 +150,7 @@ export interface Schedule {
   slots: SlotLezione[];
   classes?: SchoolClass[];
   teachers?: Teacher[];
+  stage_cells?: { classe_id: string; classe_nome: string; giorno: string }[];
 }
 
 export interface ChatMessage {

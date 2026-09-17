@@ -60,7 +60,9 @@ class CalendarioDati:
     ore_max_giornata: int
     gruppo: Optional[str] = None
     flag_stage_classe_id: Optional[str] = None
+    flag_stage_gruppo: bool = False  # whole gruppo on stage this giorno, see model docstring
     flag_chiusura: bool = False
+    ora_inizio_min: Optional[int] = None  # 8-13: no lesson before this hour (staggered ingressi)
 
 
 @dataclass
@@ -115,7 +117,7 @@ class SoftPenalty:
     """
     var: Any  # cp_model IntVar; > 0 in the solution means this is violated
     weight: int
-    kind: str  # "teoria_consecutive" | "ore_target_deviation" | "contractor_gap" | "free_hours"
+    kind: str  # "teoria_consecutive" | "ore_target_deviation" | "contractor_gap" | "free_hours" | "classe_late_start"
     description: str
     classe_id: Optional[str] = None
     docente_id: Optional[str] = None
@@ -174,6 +176,12 @@ class ScheduleSolver:
         # Soft constraint penalties
         self.soft_penalties = []
 
+        # (classe_id, giorno) -> [(ora, start_var), ...] from
+        # _constraint_no_classe_schedule_gaps, reused by
+        # _soft_classe_start_at_8 so "which hour starts the day's one
+        # lesson block" is only modeled once.
+        self._classe_day_starts: Dict[Tuple[str, int], List[Tuple[int, Any]]] = {}
+
     def build_model(self) -> "ScheduleSolver":
         """
         Build OR-Tools CP-SAT model.
@@ -221,6 +229,12 @@ class ScheduleSolver:
 
         # Hard 2: Day capacity constraint
         self._constraint_day_capacity()
+
+        # Hard 2b: No gaps in a classe's daily schedule
+        self._constraint_no_classe_schedule_gaps()
+
+        # Hard 2c: Staggered ingressi (per-classe earliest start hour)
+        self._constraint_classe_start_time()
 
         # Hard 3: Paired classes
         self._constraint_paired_classes()
@@ -362,6 +376,11 @@ class ScheduleSolver:
 
         if gruppo is not None:
             for c in self.context.calendario:
+                if c.giorno == giorno and c.gruppo == gruppo and c.flag_stage_gruppo:
+                    return 0
+
+        if gruppo is not None:
+            for c in self.context.calendario:
                 if c.giorno == giorno and c.gruppo == gruppo:
                     return 0 if c.flag_chiusura else c.ore_max_giornata
 
@@ -370,6 +389,49 @@ class ScheduleSolver:
                 return 0 if c.flag_chiusura else c.ore_max_giornata
 
         return 6  # no calendar data at all for this day: default
+
+    def _ora_inizio_min_for_classe_giorno(self, classe_id: str, giorno: int) -> Optional[int]:
+        """
+        Resolve the earliest allowed lesson hour (8-13) for a classe on a
+        given giorno, e.g. to stagger ingressi across gruppi so not every
+        classe starts at 8:00. None means no minimum (may start at 8:00).
+        Same gruppo-then-school-wide lookup order as _ore_max_for_classe_giorno.
+        """
+        gruppo = self.context.classi_gruppo.get(classe_id)
+
+        if gruppo is not None:
+            for c in self.context.calendario:
+                if c.giorno == giorno and c.gruppo == gruppo and c.ora_inizio_min is not None:
+                    return c.ora_inizio_min
+
+        for c in self.context.calendario:
+            if c.giorno == giorno and c.gruppo is None and c.ora_inizio_min is not None:
+                return c.ora_inizio_min
+
+        return None
+
+    def _constraint_classe_start_time(self) -> None:
+        """
+        Hard constraint 2c: a classe can't have a lesson before its
+        resolved ora_inizio_min this giorno (see
+        _ora_inizio_min_for_classe_giorno) - lets an admin stagger ingressi
+        across gruppi instead of every classe defaulting to 8:00, the only
+        hour with nothing pushing lessons away from it.
+        """
+        classi_asgs: Dict[str, List[AssegnazioneDati]] = {}
+        for asg in self.context.assegnazioni:
+            classi_asgs.setdefault(asg.classe_id, []).append(asg)
+
+        for classe_id, asgs in classi_asgs.items():
+            for giorno in range(5):
+                ora_min = self._ora_inizio_min_for_classe_giorno(classe_id, giorno)
+                if not ora_min:
+                    continue
+                for asg in asgs:
+                    for ora in range(min(ora_min - 8, 6)):
+                        key = (asg.assegnazione_id, giorno, ora)
+                        if key in self.x:
+                            self.model.Add(self.x[key] == 0)
 
     def _constraint_day_capacity(self) -> None:
         """Hard constraint 2: Per-class daily hours <= ore_max_giornata (can
@@ -401,6 +463,63 @@ class ScheduleSolver:
 
                 if hours_in_day:
                     self.model.Add(sum(hours_in_day) <= ore_max)
+
+    def _constraint_no_classe_schedule_gaps(self) -> None:
+        """
+        Hard constraint 2b: a classe's lesson hours in a day must form one
+        contiguous block - no "ora buca" (a free hour with lessons both
+        before and after it). Starting late or ending early is fine (that's
+        not a gap, and _constraint_day_capacity already allows a classe's
+        daily total to fall short of ore_max_giornata); only a hole *inside*
+        the day's lessons is forbidden.
+
+        Encoded as: at most one "run" of occupied hours per classe/giorno,
+        where an hour starts a run iff it's occupied and the previous hour
+        wasn't - two or more runs means at least one gap sits between them.
+        """
+        classi_asgs: Dict[str, List[AssegnazioneDati]] = {}
+        for asg in self.context.assegnazioni:
+            classi_asgs.setdefault(asg.classe_id, []).append(asg)
+
+        for classe_id, asgs in classi_asgs.items():
+            for giorno in range(5):
+                occupied: List[Any] = []
+                for ora in range(6):
+                    slots = [
+                        self.x[(asg.assegnazione_id, giorno, ora)]
+                        for asg in asgs
+                        if (asg.assegnazione_id, giorno, ora) in self.x
+                    ]
+                    if not slots:
+                        occupied.append(None)
+                        continue
+                    # _constraint_classe_no_overlap already caps this sum at
+                    # 1, so it doubles as a 0/1 "is this hour occupied" var.
+                    occ = self.model.NewBoolVar(f"occ_{classe_id}_{giorno}_{ora}")
+                    self.model.Add(sum(slots) == occ)
+                    occupied.append(occ)
+
+                starts = []
+                starts_by_ora = []
+                prev = None
+                for i, occ in enumerate(occupied):
+                    if occ is None:
+                        prev = None
+                        continue
+                    start = self.model.NewBoolVar(f"start_{classe_id}_{giorno}_{i}")
+                    if prev is None:
+                        self.model.Add(start == occ)
+                    else:
+                        self.model.Add(start <= occ)
+                        self.model.Add(start <= 1 - prev)
+                        self.model.Add(start >= occ - prev)
+                    starts.append(start)
+                    starts_by_ora.append((i, start))
+                    prev = occ
+
+                if starts:
+                    self.model.Add(sum(starts) <= 1)
+                self._classe_day_starts[(classe_id, giorno)] = starts_by_ora
 
     def _constraint_paired_classes(self) -> None:
         """
@@ -476,19 +595,24 @@ class ScheduleSolver:
     def _constraint_exclude_stage(self) -> None:
         """Hard constraint 5: Exclude classes in stage from scheduling."""
         for giorno_data in self.context.calendario:
-            if not giorno_data.flag_stage_classe_id:
-                continue
-
-            classe_in_stage = giorno_data.flag_stage_classe_id
             giorno = giorno_data.giorno
 
-            # Find all asgs for this classe
+            if giorno_data.flag_stage_classe_id:
+                classi_in_stage = [giorno_data.flag_stage_classe_id]
+            elif giorno_data.flag_stage_gruppo and giorno_data.gruppo:
+                classi_in_stage = [
+                    classe_id for classe_id, gruppo in self.context.classi_gruppo.items()
+                    if gruppo == giorno_data.gruppo
+                ]
+            else:
+                continue
+
             asgs_in_stage = [
                 asg for asg in self.context.assegnazioni
-                if asg.classe_id == classe_in_stage
+                if asg.classe_id in classi_in_stage
             ]
 
-            # Zero out all slots for this classe on this giorno
+            # Zero out all slots for these classi on this giorno
             for asg in asgs_in_stage:
                 for ora in range(6):
                     key = (asg.assegnazione_id, giorno, ora)
@@ -564,6 +688,45 @@ class ScheduleSolver:
         # Soft 5: Minimize free/"Libera" hours (weight 100 - dominant over
         # every other soft goal above, see _soft_no_free_hours)
         self._soft_no_free_hours()
+
+        # Soft 6: Start the day at 8:00 (weight 100 - same top priority as
+        # _soft_no_free_hours; only yield to a later start when 8:00 is
+        # genuinely unavailable that day, see _soft_classe_start_at_8)
+        self._soft_classe_start_at_8()
+
+    def _soft_classe_start_at_8(self) -> None:
+        """
+        Soft: a classe should start its day at 8:00 whenever possible -
+        weighted at the same top tier as _soft_no_free_hours (100) so the
+        solver only pushes a classe's start later than 8:00 when nothing
+        else can make 8:00 work that day (e.g. its docente isn't available
+        then), not as an arbitrary tie-break. Not a hard constraint: an
+        explicit ora_inizio_min override (see _constraint_classe_start_time)
+        still needs to be able to ask for a later start on purpose.
+
+        Reuses the per-(classe, giorno) "which hour starts the day's one
+        lesson block" vars built in _constraint_no_classe_schedule_gaps:
+        exactly one of them is 1 when the classe has any lesson that day
+        (none if the day is entirely free), so summing every start var
+        *except* hour 0's gives a 0/1 "didn't start at 8:00" penalty.
+        """
+        weight = 100
+        classe_nomi = {asg.classe_id: asg.classe_nome for asg in self.context.assegnazioni}
+
+        for (classe_id, giorno), starts_by_ora in self._classe_day_starts.items():
+            if len(starts_by_ora) < 2 or starts_by_ora[0][0] != 0:
+                continue  # no 8:00 slot for this classe/giorno to prefer
+
+            late_starts = [start for ora, start in starts_by_ora if ora != 0]
+            late_start = self.model.NewBoolVar(f"late_start_{classe_id}_{giorno}")
+            self.model.Add(late_start == sum(late_starts))
+            self.soft_penalties.append(SoftPenalty(
+                var=late_start, weight=weight, kind="classe_late_start",
+                description=(
+                    f"Inizio dopo le 8:00 per {classe_nomi.get(classe_id, classe_id)} "
+                    f"({GIORNI_NOMI_IT[GiornoEnum(giorno).name]})"
+                ),
+            ))
 
     def _soft_no_free_hours(self) -> None:
         """

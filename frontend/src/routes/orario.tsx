@@ -95,6 +95,7 @@ function SchedulePage() {
     }
     const seen = new Map<string, string>();
     for (const s of active.slots) seen.set(s.classe_id, s.classe_nome ?? s.classe_id);
+    for (const sc of active.stage_cells ?? []) seen.set(sc.classe_id, sc.classe_nome ?? sc.classe_id);
     return [...seen].map(([id, nome]) => ({ id, nome }));
   }, [active]);
 
@@ -345,6 +346,56 @@ function ScheduleTable({
     const oraKey = `${String(s.ora_inizio).padStart(2, "0")}:00`;
     byCell.set(`${oraKey}|${s.classe_id}`, s);
   }
+  const stageClassi = new Set(
+    (schedule.stage_cells ?? [])
+      .filter((sc) => sc.giorno === giorno.toUpperCase())
+      .map((sc) => sc.classe_id),
+  );
+  const classeIndex = new Map(classi.map((c, i) => [c.id, i]));
+
+  // A joint lesson can span more than 2 classi (a 4-way group is stored as
+  // one ClasseAccoppiata row per pair, see backend docstring). Group classi
+  // that actually co-occur this hour by following classe_accoppiata_id
+  // edges, instead of only skipping one named partner - otherwise a 3rd/4th
+  // class in the group re-uses a column already merged into an earlier
+  // class's colSpan and every following column shifts left.
+  function groupForHour(ora: string): {
+    cellSlots: Map<string, SlotLezione>;
+    groupOf: Map<string, string[]>;
+  } {
+    const cellSlots = new Map<string, SlotLezione>();
+    for (const c of classi) {
+      const slot = byCell.get(`${ora}|${c.id}`);
+      if (slot) cellSlots.set(c.id, slot);
+    }
+
+    const parent = new Map<string, string>();
+    for (const id of cellSlots.keys()) parent.set(id, id);
+    function find(x: string): string {
+      while (parent.get(x) !== x) x = parent.get(x) as string;
+      return x;
+    }
+
+    for (const [classeId, slot] of cellSlots) {
+      const partner = slot.classe_accoppiata_id;
+      if (slot.accoppiata && partner && parent.has(partner)) {
+        const ra = find(classeId);
+        const rb = find(partner);
+        if (ra !== rb) parent.set(ra, rb);
+      }
+    }
+
+    const byRoot = new Map<string, string[]>();
+    for (const id of cellSlots.keys()) {
+      const root = find(id);
+      const group = byRoot.get(root) ?? [];
+      group.push(id);
+      byRoot.set(root, group);
+    }
+    const groupOf = new Map<string, string[]>();
+    for (const id of cellSlots.keys()) groupOf.set(id, byRoot.get(find(id)) as string[]);
+    return { cellSlots, groupOf };
+  }
 
   return (
     <div className="glass overflow-hidden rounded-2xl">
@@ -378,6 +429,7 @@ function ScheduleTable({
         <tbody>
           {ORE.map((ora) => {
             const skip = new Set<string>();
+            const { cellSlots, groupOf } = groupForHour(ora);
             return (
               <tr key={ora}>
                 <td className="border-b border-edge px-3 py-2 font-mono text-muted-foreground">
@@ -385,7 +437,16 @@ function ScheduleTable({
                 </td>
                 {classi.map((c) => {
                   if (skip.has(c.id)) return null;
-                  const slot = byCell.get(`${ora}|${c.id}`);
+                  if (stageClassi.has(c.id)) {
+                    return (
+                      <td key={c.id} className="border-b border-edge px-2 py-2">
+                        <div className="rounded-md border border-warn bg-warn/20 px-2 py-1 text-center font-semibold text-warn">
+                          STAGE
+                        </div>
+                      </td>
+                    );
+                  }
+                  const slot = cellSlots.get(c.id);
                   if (!slot) {
                     return (
                       <td key={c.id} className="border-b border-edge px-2 py-2">
@@ -395,8 +456,23 @@ function ScheduleTable({
                       </td>
                     );
                   }
-                  const paired = slot.accoppiata && slot.classe_accoppiata_id;
-                  if (paired) skip.add(slot.classe_accoppiata_id as string);
+                  const group = groupOf.get(c.id) ?? [c.id];
+                  let colSpan = 1;
+                  if (group.length > 1) {
+                    const indices = group
+                      .map((id) => classeIndex.get(id) as number)
+                      .sort((a, b) => a - b);
+                    const first = indices[0] as number;
+                    const contiguous = indices.every((idx, i) => idx === first + i);
+                    // Only merge into one cell when the group is an unbroken
+                    // run of columns; otherwise leave each classe its own
+                    // cell rather than risk an invalid colSpan.
+                    if (contiguous) {
+                      colSpan = group.length;
+                      for (const id of group) if (id !== c.id) skip.add(id);
+                    }
+                  }
+                  const paired = colSpan > 1;
                   const tone = slot.conflitto
                     ? "border-conflict bg-conflict/10"
                     : slot.materia_tipo === "PRATICA"
@@ -407,7 +483,7 @@ function ScheduleTable({
                   return (
                     <td
                       key={c.id}
-                      colSpan={paired ? 2 : 1}
+                      colSpan={colSpan}
                       className="border-b border-edge px-2 py-2"
                     >
                       <button
@@ -416,9 +492,6 @@ function ScheduleTable({
                         title={`Monte ore residuo non disponibile senza backend`}
                         className={`w-full rounded-md border-l-2 px-2 py-1 text-left transition-opacity ${tone} ${dimmed}`}
                       >
-                        <span className="font-semibold">
-                          {slot.materia_nome ?? slot.materia_id}
-                        </span>
                         <span
                           role="link"
                           tabIndex={0}
@@ -434,7 +507,7 @@ function ScheduleTable({
                               onHighlightTeacher(slot.docente_id);
                             }
                           }}
-                          className="block text-[10px] text-muted-foreground underline-offset-2 hover:underline"
+                          className="font-semibold underline-offset-2 hover:underline"
                         >
                           {slot.docente_nome ?? slot.docente_id}
                           {paired ? " · accoppiata" : ""}
