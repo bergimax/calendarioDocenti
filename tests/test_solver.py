@@ -44,10 +44,13 @@ def _minimal_context(**overrides):
         [
             AssegnazioneDati(
                 "a1", "d1", "Prof Rossi", "ASSUNTO", "c1", "1A", "m1", "Matematica",
-                "TEORIA", "ALTO", ore_residue=10,
+                "TEORIA", "ALTO", ore_residue=30,
             ),
         ],
     )
+    # 30 = 6h/giorno x 5 giorni: the classe's day capacity is now a hard
+    # == (see _constraint_day_capacity), so a full week's fill must be
+    # actually reachable given ore_residue, not just an upper bound.
     calendario = overrides.get(
         "calendario",
         [CalendarioDati(date(2026, 4, 6 + g), g, ore_max_giornata=6) for g in range(5)],
@@ -239,12 +242,24 @@ def test_pratica_short_isolated_hour_is_flagged_too_short():
     assegnazioni = [
         AssegnazioneDati("a1", "d1", "Prof Bianchi", "ASSUNTO", "c1", "1A", "m2", "Lab",
                           "PRATICA", "MEDIO", ore_residue=20),
+        # Fills every other classroom hour of the week for c1, so the
+        # classe's day capacity (now a hard ==, see _constraint_day_capacity)
+        # is satisfied while day_cap - and so _soft_pratica_blocks' own
+        # min(3, day_cap) threshold - stays a normal 6h day, not an
+        # artificially short one.
+        AssegnazioneDati("a2", "d1", "Prof Bianchi", "ASSUNTO", "c1", "1A", "m1", "Matematica",
+                          "TEORIA", "ALTO", ore_residue=29),
     ]
-    ctx = _minimal_context(assegnazioni=assegnazioni, materie_map={"m2": "PRATICA"})
+    ctx = _minimal_context(
+        assegnazioni=assegnazioni, materie_map={"m1": "TEORIA", "m2": "PRATICA"},
+    )
+    assigned_keys = {("a1", 0, 0)} | {
+        ("a2", g, h) for g in range(5) for h in range(6) if not (g == 0 and h == 0)
+    }
 
     solver = ScheduleSolver(ctx)
     solver.build_model()
-    assert solver.solve_fixed({("a1", 0, 0)}) in ("OPTIMAL", "FEASIBLE")
+    assert solver.solve_fixed(assigned_keys) in ("OPTIMAL", "FEASIBLE")
 
     conflicts = solver.get_conflicts()
     assert any(c["conflict_id"].startswith("pratica_block_short") for c in conflicts)

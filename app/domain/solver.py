@@ -117,7 +117,7 @@ class SoftPenalty:
     """
     var: Any  # cp_model IntVar; > 0 in the solution means this is violated
     weight: int
-    kind: str  # "teoria_consecutive" | "ore_target_deviation" | "contractor_gap" | "free_hours" | "classe_late_start"
+    kind: str  # "teoria_consecutive" | "ore_target_deviation" | "contractor_gap" | "classe_late_start"
     description: str
     classe_id: Optional[str] = None
     docente_id: Optional[str] = None
@@ -334,12 +334,10 @@ class ScheduleSolver:
         at most one assegnazione (any docente) active per classe/giorno/ora.
 
         _constraint_day_capacity only bounds the day's *total* filled-hour
-        count, not which specific hours those are - without this, nothing
-        stopped several docenti being piled onto the same hour (which still
-        counts toward that total) while other hours of the day stayed empty,
-        which is exactly what _soft_no_free_hours's weight-100 pressure to
-        maximize the count started doing once real per-assignment hours (and
-        real pairings) made high fill rates achievable.
+        count (now pinned exactly to ore_max_giornata), not which specific
+        hours those are - without this, nothing would stop several docenti
+        being piled onto the same hour (which still counts toward that
+        total) while other hours of the day stayed empty.
         """
         classi_asgs: Dict[str, List[AssegnazioneDati]] = {}
         for asg in self.context.assegnazioni:
@@ -434,13 +432,17 @@ class ScheduleSolver:
                             self.model.Add(self.x[key] == 0)
 
     def _constraint_day_capacity(self) -> None:
-        """Hard constraint 2: Per-class daily hours <= ore_max_giornata (can
-        never exceed the calendar's cap - physically impossible, not just
-        undesirable). Getting close to *no* free/"Libera" hours - as close as
-        the current docenti/ore actually allow - is instead a soft goal, see
-        _soft_no_free_hours: even the real historical example timetable
-        (Documenti/es_di_calendario.pdf) was only ~96% full, so treating full
-        coverage as hard would make generation fail outright on real data."""
+        """Hard constraint 2: a class's daily hours must equal
+        ore_max_giornata exactly - no free/"Libera" hours, by admin
+        decision (2026-09-18): every classroom hour must be filled, even at
+        the cost of the whole week failing to generate (INFEASIBLE) when
+        the docenti actually available that day can't cover it. This
+        replaced an earlier <= formulation with a soft fill-rate goal
+        (_soft_no_free_hours, since removed) that tolerated gaps the way
+        the real historical example timetable had them (Documenti/
+        es_di_calendario.pdf was only ~96% full) - the admin wants gaps
+        surfaced as a generation failure to fix (docenti/disponibilita),
+        not silently accepted in the output."""
         # Group assegnazioni by classe
         classi_asgs = {}
         for asg in self.context.assegnazioni:
@@ -462,16 +464,17 @@ class ScheduleSolver:
                 ]
 
                 if hours_in_day:
-                    self.model.Add(sum(hours_in_day) <= ore_max)
+                    self.model.Add(sum(hours_in_day) == ore_max)
 
     def _constraint_no_classe_schedule_gaps(self) -> None:
         """
         Hard constraint 2b: a classe's lesson hours in a day must form one
         contiguous block - no "ora buca" (a free hour with lessons both
-        before and after it). Starting late or ending early is fine (that's
-        not a gap, and _constraint_day_capacity already allows a classe's
-        daily total to fall short of ore_max_giornata); only a hole *inside*
-        the day's lessons is forbidden.
+        before and after it). Now that _constraint_day_capacity pins the
+        day's total to exactly ore_max_giornata, this only has teeth on a
+        shorter day (e.g. Friday's 5-hour cap leaves one of the 6 slots
+        free): it forces that one free slot to sit at the start or end of
+        the day, never in the middle.
 
         Encoded as: at most one "run" of occupied hours per classe/giorno,
         where an hour starts a run iff it's occupied and the previous hour
@@ -685,24 +688,27 @@ class ScheduleSolver:
         # Soft 4: Minimize ore buche for contrattisti (weight 12)
         self._soft_contractor_gaps()
 
-        # Soft 5: Minimize free/"Libera" hours (weight 100 - dominant over
-        # every other soft goal above, see _soft_no_free_hours)
-        self._soft_no_free_hours()
-
-        # Soft 6: Start the day at 8:00 (weight 100 - same top priority as
-        # _soft_no_free_hours; only yield to a later start when 8:00 is
-        # genuinely unavailable that day, see _soft_classe_start_at_8)
+        # Soft 5: Start the day at 8:00 (weight 100 - top priority; only
+        # yield to a later start when 8:00 is genuinely unavailable that
+        # day, see _soft_classe_start_at_8). Filling every classroom hour
+        # is now a HARD constraint (_constraint_day_capacity), not a soft
+        # goal - there's no more "free hours" to minimize here.
         self._soft_classe_start_at_8()
 
     def _soft_classe_start_at_8(self) -> None:
         """
         Soft: a classe should start its day at 8:00 whenever possible -
-        weighted at the same top tier as _soft_no_free_hours (100) so the
-        solver only pushes a classe's start later than 8:00 when nothing
-        else can make 8:00 work that day (e.g. its docente isn't available
-        then), not as an arbitrary tie-break. Not a hard constraint: an
-        explicit ora_inizio_min override (see _constraint_classe_start_time)
-        still needs to be able to ask for a later start on purpose.
+        weighted at the top tier (100) so the solver only pushes a classe's
+        start later than 8:00 when nothing else can make 8:00 work that day
+        (e.g. its docente isn't available then), not as an arbitrary
+        tie-break. On a full ore_max_giornata day this is moot -
+        _constraint_day_capacity + _constraint_no_classe_schedule_gaps
+        already force one contiguous block spanning the whole day - it only
+        matters on a shorter day (e.g. Friday), where 8:00-13:00 and
+        9:00-14:00 both satisfy those hard constraints equally well. Not a
+        hard constraint itself: an explicit ora_inizio_min override (see
+        _constraint_classe_start_time) still needs to be able to ask for a
+        later start on purpose.
 
         Reuses the per-(classe, giorno) "which hour starts the day's one
         lesson block" vars built in _constraint_no_classe_schedule_gaps:
@@ -727,49 +733,6 @@ class ScheduleSolver:
                     f"({GIORNI_NOMI_IT[GiornoEnum(giorno).name]})"
                 ),
             ))
-
-    def _soft_no_free_hours(self) -> None:
-        """
-        Soft: minimize empty ("Libera") hours per classe/giorno, weighted far
-        above every other soft goal (100 vs. the 8-15 range above) so the
-        solver always tries to fill a class's day before optimizing anything
-        else - the closest a hard "no free hours" constraint gets without
-        risking outright infeasibility (see _constraint_day_capacity's
-        docstring: even the real historical example timetable was only
-        ~96% full, so a true hard constraint fails to generate at all on
-        real data).
-        """
-        weight = 100
-
-        classi_asgs: Dict[str, List[AssegnazioneDati]] = {}
-        for asg in self.context.assegnazioni:
-            classi_asgs.setdefault(asg.classe_id, []).append(asg)
-
-        for classe_id, asgs in classi_asgs.items():
-            classe_nome = asgs[0].classe_nome
-            for giorno in range(5):
-                ore_max = self._ore_max_for_classe_giorno(classe_id, giorno)
-                if ore_max <= 0:
-                    continue
-
-                hours_in_day = [
-                    self.x[(asg.assegnazione_id, giorno, ora)]
-                    for asg in asgs
-                    for ora in range(6)
-                    if (asg.assegnazione_id, giorno, ora) in self.x
-                ]
-                if not hours_in_day:
-                    continue
-
-                free_hours = self.model.NewIntVar(0, ore_max, f"free_hours_{classe_id}_{giorno}")
-                self.model.Add(free_hours >= ore_max - sum(hours_in_day))
-                self.soft_penalties.append(SoftPenalty(
-                    var=free_hours, weight=weight, kind="free_hours",
-                    description=(
-                        f"Ore libere per {classe_nome} ({GIORNI_NOMI_IT[GiornoEnum(giorno).name]})"
-                    ),
-                    classe_id=classe_id, giorno=giorno,
-                ))
 
     def _soft_teoria_consecutive(self) -> None:
         """
