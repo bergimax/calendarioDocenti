@@ -117,7 +117,7 @@ class SoftPenalty:
     """
     var: Any  # cp_model IntVar; > 0 in the solution means this is violated
     weight: int
-    kind: str  # "teoria_consecutive" | "ore_target_deviation" | "contractor_gap" | "classe_late_start" | "availability_override"
+    kind: str  # "teoria_consecutive" | "ore_target_deviation" | "contractor_gap" | "classe_late_start" | "availability_override" | "single_classe_day"
     description: str
     classe_id: Optional[str] = None
     docente_id: Optional[str] = None
@@ -725,6 +725,10 @@ class ScheduleSolver:
         # Soft 4: Minimize ore buche for contrattisti (weight 12)
         self._soft_contractor_gaps()
 
+        # Soft 4b: Avoid a docente spending a whole day with one classe
+        # (weight 10)
+        self._soft_avoid_single_classe_day()
+
         # Soft 5: Start the day at 8:00 (weight 100 - top priority; only
         # yield to a later start when 8:00 is genuinely unavailable that
         # day, see _soft_classe_start_at_8). Filling every classroom hour
@@ -1012,6 +1016,80 @@ class ScheduleSolver:
                                 "action_type": "authorize_early_exit", "label": "Autorizza uscita anticipata",
                             },
                         ))
+
+    def _soft_avoid_single_classe_day(self) -> None:
+        """
+        Soft: a docente who teaches more than one classe shouldn't spend an
+        entire day with only one of them (weight 10, same tier as
+        _soft_teoria_consecutive) - admin-observed 2026-09-18 as an
+        undesirable default pattern, but explicitly not a hard rule: the
+        admin may want exactly this on purpose (e.g. a project day), so the
+        "authorize_single_classe_day" deroga (scoped to that docente) turns
+        the penalty off for a single generation run.
+
+        Only meaningful for a docente with >=2 distinct classi overall - one
+        who only ever teaches a single classe has no alternative, so isn't
+        penalized. Only flags a day with a real number of hours (>= 3): a
+        lone hour or two is trivially "all with one classe" and isn't the
+        monotony pattern being discouraged.
+        """
+        weight = 10
+        MIN_HOURS = 3
+
+        skip_ids = self._paired_assignment_ids_to_dedupe()
+
+        asgs_by_docente: Dict[str, List[AssegnazioneDati]] = {}
+        for asg in self.context.assegnazioni:
+            asgs_by_docente.setdefault(asg.docente_id, []).append(asg)
+
+        for docente_id, asgs in asgs_by_docente.items():
+            classi_ids = {a.classe_id for a in asgs}
+            if len(classi_ids) < 2:
+                continue
+
+            if self._deroga_active("authorize_single_classe_day", docente_id=docente_id):
+                continue
+
+            docente_nome = asgs[0].docente_nome
+
+            for giorno in range(5):
+                total_hours = sum(
+                    self.x[(a.assegnazione_id, giorno, ora)]
+                    for a in asgs
+                    if a.assegnazione_id not in skip_ids
+                    for ora in range(6)
+                    if (a.assegnazione_id, giorno, ora) in self.x
+                )
+
+                for classe_id in classi_ids:
+                    classe_asgs = [a for a in asgs if a.classe_id == classe_id]
+                    hours_with_classe = sum(
+                        self.x[(a.assegnazione_id, giorno, ora)]
+                        for a in classe_asgs
+                        for ora in range(6)
+                        if (a.assegnazione_id, giorno, ora) in self.x
+                    )
+
+                    # is_mono == 1 iff every one of the docente's hours that
+                    # day (at least MIN_HOURS of them) was with this classe.
+                    is_mono = self.model.NewBoolVar(f"mono_classe_{docente_id}_{classe_id}_{giorno}")
+                    self.model.Add(hours_with_classe >= total_hours).OnlyEnforceIf(is_mono)
+                    self.model.Add(total_hours >= MIN_HOURS).OnlyEnforceIf(is_mono)
+                    self.model.Add(hours_with_classe < total_hours).OnlyEnforceIf(is_mono.Not())
+
+                    self.soft_penalties.append(SoftPenalty(
+                        var=is_mono, weight=weight, kind="single_classe_day",
+                        description=(
+                            f"{docente_nome} passa tutta la giornata con una sola classe "
+                            f"({classe_asgs[0].classe_nome}, "
+                            f"{GIORNI_NOMI_IT[GiornoEnum(giorno).name]})"
+                        ),
+                        docente_id=docente_id, classe_id=classe_id, giorno=giorno,
+                        suggested_action={
+                            "action_type": "authorize_single_classe_day",
+                            "label": "Autorizza giornata mono-classe",
+                        },
+                    ))
 
     def solve_fixed(self, assigned_keys: Set[Tuple[str, int, int]], timeout_seconds: int = 10) -> str:
         """

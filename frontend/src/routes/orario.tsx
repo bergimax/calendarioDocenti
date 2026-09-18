@@ -46,6 +46,7 @@ const QUICK_ACTIONS = [
   { action_type: "reduce_contract_hours", label: "Riduci ore docente a contratto" },
   { action_type: "authorize_early_exit", label: "Autorizza uscita anticipata" },
   { action_type: "override_availability", label: "Deroga disponibilità" },
+  { action_type: "authorize_single_classe_day", label: "Autorizza giornata mono-classe" },
 ];
 
 // generate/regenerate, modify-slot and apply-quick-action all reply with

@@ -13,6 +13,7 @@ QUICK_ACTIONS = {
     "reduce_contract_hours",
     "authorize_early_exit",
     "override_availability",
+    "authorize_single_classe_day",
 }
 
 
