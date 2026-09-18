@@ -1069,13 +1069,30 @@ class ScheduleSolver:
                         for ora in range(6)
                         if (a.assegnazione_id, giorno, ora) in self.x
                     )
+                    # hours_with_classe is always <= total_hours (it's a
+                    # subset of the same day's hours), so this is >= 0.
+                    other_hours = total_hours - hours_with_classe
+
+                    # has_others == 1 iff the docente also worked a
+                    # DIFFERENT classe that day. Reified via >=1/==0 (not
+                    # a strict "<" against total_hours) so a day with zero
+                    # hours worked at all (other_hours == 0, same as a day
+                    # entirely with this classe) doesn't force a
+                    # contradiction - a docente not working a giorno at all
+                    # must stay a legitimate, unpenalized option.
+                    has_others = self.model.NewBoolVar(f"has_other_classe_{docente_id}_{classe_id}_{giorno}")
+                    self.model.Add(other_hours >= 1).OnlyEnforceIf(has_others)
+                    self.model.Add(other_hours == 0).OnlyEnforceIf(has_others.Not())
+
+                    enough_hours = self.model.NewBoolVar(f"enough_hours_{docente_id}_{classe_id}_{giorno}")
+                    self.model.Add(total_hours >= MIN_HOURS).OnlyEnforceIf(enough_hours)
+                    self.model.Add(total_hours < MIN_HOURS).OnlyEnforceIf(enough_hours.Not())
 
                     # is_mono == 1 iff every one of the docente's hours that
                     # day (at least MIN_HOURS of them) was with this classe.
                     is_mono = self.model.NewBoolVar(f"mono_classe_{docente_id}_{classe_id}_{giorno}")
-                    self.model.Add(hours_with_classe >= total_hours).OnlyEnforceIf(is_mono)
-                    self.model.Add(total_hours >= MIN_HOURS).OnlyEnforceIf(is_mono)
-                    self.model.Add(hours_with_classe < total_hours).OnlyEnforceIf(is_mono.Not())
+                    self.model.AddBoolAnd([has_others.Not(), enough_hours]).OnlyEnforceIf(is_mono)
+                    self.model.AddBoolOr([has_others, enough_hours.Not()]).OnlyEnforceIf(is_mono.Not())
 
                     self.soft_penalties.append(SoftPenalty(
                         var=is_mono, weight=weight, kind="single_classe_day",
