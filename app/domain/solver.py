@@ -117,7 +117,7 @@ class SoftPenalty:
     """
     var: Any  # cp_model IntVar; > 0 in the solution means this is violated
     weight: int
-    kind: str  # "teoria_consecutive" | "ore_target_deviation" | "contractor_gap" | "classe_late_start"
+    kind: str  # "teoria_consecutive" | "ore_target_deviation" | "contractor_gap" | "classe_late_start" | "availability_override"
     description: str
     classe_id: Optional[str] = None
     docente_id: Optional[str] = None
@@ -239,7 +239,8 @@ class ScheduleSolver:
         # Hard 3: Paired classes
         self._constraint_paired_classes()
 
-        # Hard 4: Teacher availability
+        # Hard 4: Teacher availability (relaxable at an extreme weight, see
+        # _constraint_teacher_availability's docstring)
         self._constraint_teacher_availability()
 
         # Hard 5: Exclude stage classes
@@ -547,9 +548,33 @@ class ScheduleSolver:
                         self.model.Add(self.x[key_a] == self.x[key_b])
 
     def _constraint_teacher_availability(self) -> None:
-        """Hard constraint 4: Respect teacher availability + ASSUNTO 8-14 range."""
+        """
+        Hard constraint 4, but relaxable: respect teacher availability +
+        ASSUNTO's implicit 8-14 range.
+
+        Not fully hard, though: _constraint_day_capacity now demands 100%
+        classroom fill every day, and a CONTRATTO docente's recorded day
+        off is exactly the kind of thing that can make a week impossible
+        to fill even though it's otherwise entirely solvable. So instead
+        of an unconditional block, each (docente, giorno) that would
+        otherwise force 0 hours gets its own "override" bool var, at an
+        extreme weight (1000 - two orders of magnitude above every other
+        soft goal, see RELAX_WEIGHT) so the solver only breaks a docente's
+        day off when there is truly no other way to reach full fill, and
+        does so on the fewest (docente, giorno) pairs possible. Surfaced
+        via get_conflicts() with an "override_availability"
+        suggested_action - the same deroga an admin would apply by hand -
+        so a forced override is always visible and actionable, never a
+        silent change to the docente's recorded disponibilita.
+        """
+        RELAX_WEIGHT = 1000
+        giorni_nomi = ["lunedi", "martedi", "mercoledi", "giovedi", "venerdi"]
+
+        asgs_by_docente: Dict[str, List[AssegnazioneDati]] = {}
         for asg in self.context.assegnazioni:
-            docente_id = asg.docente_id
+            asgs_by_docente.setdefault(asg.docente_id, []).append(asg)
+
+        for docente_id, asgs in asgs_by_docente.items():
             docente_tipo = self.context.docenti_map.get(docente_id)
 
             # ASSUNTO: implicit (already limited to 0-5 which is 8-14)
@@ -561,39 +586,51 @@ class ScheduleSolver:
             if self._deroga_active("override_availability", docente_id=docente_id):
                 continue
 
-            # CONTRATTO: respect giorni_fasce
             disponibilita = self.context.disponibilita_map.get(docente_id)
-            if not disponibilita:
-                # No availability recorded -> treat as unavailable all week
-                logger.warning(f"No availability found for CONTRATTO {docente_id}, treating as unavailable")
-                for giorno in range(5):
-                    for ora in range(6):
-                        key = (asg.assegnazione_id, giorno, ora)
-                        if key in self.x:
-                            self.model.Add(self.x[key] == 0)
-                continue
+            docente_nome = asgs[0].docente_nome
 
-            # Check giorni_fasce for unavailable slots
-            giorni_nomi = ["lunedi", "martedi", "mercoledi", "giovedi", "venerdi"]
             for giorno in range(5):
-                giorno_nome = giorni_nomi[giorno]
-                slots = disponibilita.giorni_fasce.get(giorno_nome, [])
-
-                for slot in slots:
-                    disponibile = slot.get("disponibile", False)
-                    if disponibile:
-                        continue
-
-                    # Extract hour from time (e.g., "08:00" -> 8)
-                    try:
-                        ora_inizio = int(slot["ora_inizio"].split(":")[0])
-                        hora_idx = ora_inizio - 8  # 8->0, 9->1, ..., 13->5
+                if disponibilita:
+                    giorno_nome = giorni_nomi[giorno]
+                    unavailable_ore: List[int] = []
+                    for slot in disponibilita.giorni_fasce.get(giorno_nome, []):
+                        if slot.get("disponibile", False):
+                            continue
+                        try:
+                            hora_idx = int(slot["ora_inizio"].split(":")[0]) - 8  # 8->0, ..., 13->5
+                        except (ValueError, KeyError):
+                            logger.warning(f"Invalid time slot format: {slot}")
+                            continue
                         if 0 <= hora_idx < 6:
-                            key = (asg.assegnazione_id, giorno, hora_idx)
-                            if key in self.x:
-                                self.model.Add(self.x[key] == 0)
-                    except (ValueError, IndexError, KeyError):
-                        logger.warning(f"Invalid time slot format: {slot}")
+                            unavailable_ore.append(hora_idx)
+                else:
+                    # No availability recorded -> treat as unavailable all week
+                    logger.warning(f"No availability found for CONTRATTO {docente_id}, treating as unavailable")
+                    unavailable_ore = list(range(6))
+
+                if not unavailable_ore:
+                    continue
+
+                relax = self.model.NewBoolVar(f"avail_override_{docente_id}_{giorno}")
+                for asg in asgs:
+                    for hora_idx in unavailable_ore:
+                        key = (asg.assegnazione_id, giorno, hora_idx)
+                        if key in self.x:
+                            self.model.Add(self.x[key] == 0).OnlyEnforceIf(relax.Not())
+
+                self.soft_penalties.append(SoftPenalty(
+                    var=relax, weight=RELAX_WEIGHT, kind="availability_override",
+                    description=(
+                        f"Disponibilità forzata per {docente_nome} "
+                        f"({GIORNI_NOMI_IT[GiornoEnum(giorno).name]}): nessun'altra "
+                        "combinazione riempiva tutte le ore delle classi"
+                    ),
+                    docente_id=docente_id, giorno=giorno,
+                    suggested_action={
+                        "action_type": "override_availability",
+                        "label": "Conferma disponibilità forzata",
+                    },
+                ))
 
     def _constraint_exclude_stage(self) -> None:
         """Hard constraint 5: Exclude classes in stage from scheduling."""
