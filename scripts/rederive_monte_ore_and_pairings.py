@@ -13,10 +13,23 @@ generated schedule full of empty "Libera" cells - it had no relationship to
 how the real week is actually structured. The PDF's grid is a real,
 once-published, ~96%-full timetable (472/493 classroom-hours - Friday runs
 5h instead of 6h for every group, per scuola.calendario_annuale). Re-deriving
-ore_totali from its actual per-(docente,classe) weekly hour count, annualized
-(x weeks_in_year), gives the solver's per-week soft target (ore_residue //
-weeks_in_year, see app/domain/solver.py) numbers that are structurally
-capable of reconstructing that same near-full grid.
+ore_totali from its actual per-(docente,classe) weekly hour count gives the
+solver's per-week soft target (ore_residue // weeks_remaining, see
+app/domain/solver.py) numbers that are structurally capable of
+reconstructing that same near-full grid.
+
+ore_totali is set to the RESIDUAL need from today to scuola.data_fine_anno
+(weekly hour count x weeks remaining), not the full-year total - no docente
+has an ore_erogate history to subtract from a full-year figure (every
+existing OrarioSettimanale is still BOZZA, not a record of hours actually
+delivered), so the residual has to be the figure this script produces
+directly. Each docente of a given classe keeps their own distinct weekly
+hour count, so their residuals differ from each other too; summed back up
+per classe they land on exactly (that classe's total weekly hours) x weeks
+remaining - the hours that classe has left to do this year. Re-running this
+script later (e.g. after ore_erogate starts being tracked, or simply to
+refresh the residual as weeks pass) is safe: it always recomputes from
+scratch rather than accumulating.
 
 Why per-docente pairings, not per-class-pair (school confirmed 2026-09-16
 after the first version of this script got it wrong): a class pairing is
@@ -47,6 +60,7 @@ Usage:
 import difflib
 import sys
 from collections import Counter, defaultdict
+from datetime import date
 from itertools import combinations
 from pathlib import Path
 from typing import Dict, FrozenSet, Optional, Set
@@ -74,7 +88,7 @@ def main(scuola_id: str = "sch_1") -> None:
     db = SessionLocal()
     try:
         scuola = db.query(Scuola).filter_by(id=scuola_id).first()
-        weeks_in_year = max(1, round((scuola.data_fine_anno - scuola.data_inizio_anno).days / 7))
+        weeks_remaining = max(1, round((scuola.data_fine_anno - date.today()).days / 7))
 
         docenti = db.query(Docente).filter_by(scuola_id=scuola_id).all()
         docente_id_by_cognome: Dict[str, str] = {}
@@ -113,10 +127,10 @@ def main(scuola_id: str = "sch_1") -> None:
                 continue
             weekly_hours[(docente_id, classe_id)].add((s["giorno"], s["ora_inizio"]))
 
-        n_updated, n_created, total_annual_hours = 0, 0, 0
+        n_updated, n_created, total_residual_hours = 0, 0, 0
         for (docente_id, classe_id), cells in weekly_hours.items():
-            ore_totali = len(cells) * weeks_in_year
-            total_annual_hours += ore_totali
+            ore_totali = len(cells) * weeks_remaining
+            total_residual_hours += ore_totali
             row = db.query(MonteOreAnnuale).filter_by(
                 scuola_id=scuola_id, docente_id=docente_id, classe_id=classe_id, materia_id=materia.id,
             ).first()
@@ -132,7 +146,7 @@ def main(scuola_id: str = "sch_1") -> None:
                 n_created += 1
         db.commit()
         print(f"MonteOreAnnuale: {n_updated} updated, {n_created} created "
-              f"(weeks_in_year={weeks_in_year}, total annual hours={total_annual_hours}).")
+              f"(weeks_remaining={weeks_remaining}, total residual hours={total_residual_hours}).")
 
         # ---- Pairings, per docente (see module docstring) -----------------
         by_cell = defaultdict(set)
