@@ -117,7 +117,7 @@ class SoftPenalty:
     """
     var: Any  # cp_model IntVar; > 0 in the solution means this is violated
     weight: int
-    kind: str  # "teoria_consecutive" | "ore_target_deviation" | "contractor_gap" | "classe_late_start" | "availability_override" | "single_classe_day"
+    kind: str  # "teoria_consecutive" | "ore_target_deviation" | "contractor_gap" | "classe_late_start" | "availability_override" | "single_classe_day" | "friday_late_start_override"
     description: str
     classe_id: Optional[str] = None
     docente_id: Optional[str] = None
@@ -235,6 +235,10 @@ class ScheduleSolver:
 
         # Hard 2c: Staggered ingressi (per-classe earliest start hour)
         self._constraint_classe_start_time()
+
+        # Hard 2d: Friday must start at 8:00 (relaxable at an extreme
+        # weight, see _constraint_friday_start_at_8's docstring)
+        self._constraint_friday_start_at_8()
 
         # Hard 3: Paired classes
         self._constraint_paired_classes()
@@ -431,6 +435,64 @@ class ScheduleSolver:
                         key = (asg.assegnazione_id, giorno, ora)
                         if key in self.x:
                             self.model.Add(self.x[key] == 0)
+
+    def _constraint_friday_start_at_8(self) -> None:
+        """
+        Hard constraint 2d, but relaxable: a classe's Friday lesson block
+        MUST start at 8:00 - admin decision (2026-09-23), stronger than the
+        top-tier soft preference _soft_classe_start_at_8 already gives
+        every day (weight 100): for Friday specifically this is enforced
+        as (near-)hard, not a tie-break the solver can trade away.
+
+        Modeled with the same relaxable-hard pattern as
+        _constraint_teacher_availability: an "override" bool var at
+        RELAX_WEIGHT (1000, an order of magnitude above every ordinary soft
+        weight, including _soft_classe_start_at_8's own 100) lets the
+        solver only break it when truly no other combination works that
+        Friday. Always surfaced via get_conflicts() with an
+        "authorize_friday_late_start" suggested_action - never a silent
+        late start, an admin has to explicitly grant permission (the same
+        deroga/quick-action mechanism as override_availability etc.).
+
+        Skips a classe/giorno with no Friday lesson at all (closure/stage,
+        ore_max_giornata == 0 - nothing to force) or where an explicit
+        ora_inizio_min staggers that classe's Friday ingresso past 8:00 on
+        purpose (_constraint_classe_start_time already forces that; forcing
+        8:00 here too would just always be infeasible/always-relaxed noise).
+        """
+        RELAX_WEIGHT = 1000
+        venerdi = GiornoEnum.VENERDI.value
+        classe_nomi = {asg.classe_id: asg.classe_nome for asg in self.context.assegnazioni}
+
+        for (classe_id, giorno), starts_by_ora in self._classe_day_starts.items():
+            if giorno != venerdi:
+                continue
+            if self._ore_max_for_classe_giorno(classe_id, giorno) <= 0:
+                continue
+            ora_min = self._ora_inizio_min_for_classe_giorno(classe_id, giorno)
+            if ora_min and ora_min > 8:
+                continue
+            if len(starts_by_ora) < 2 or starts_by_ora[0][0] != 0:
+                continue  # no 8:00 slot to require for this classe/giorno
+
+            if self._deroga_active("authorize_friday_late_start", classe_id=classe_id):
+                continue
+
+            start_at_8 = starts_by_ora[0][1]
+            relax = self.model.NewBoolVar(f"friday_late_start_override_{classe_id}")
+            self.model.Add(start_at_8 == 1).OnlyEnforceIf(relax.Not())
+            self.soft_penalties.append(SoftPenalty(
+                var=relax, weight=RELAX_WEIGHT, kind="friday_late_start_override",
+                description=(
+                    f"Inizio venerdì forzato dopo le 8:00 per {classe_nomi.get(classe_id, classe_id)}: "
+                    "nessun'altra combinazione permetteva di iniziare alle 8:00"
+                ),
+                classe_id=classe_id, giorno=giorno,
+                suggested_action={
+                    "action_type": "authorize_friday_late_start",
+                    "label": "Autorizza inizio posticipato di venerdì",
+                },
+            ))
 
     def _constraint_day_capacity(self) -> None:
         """Hard constraint 2: a class's daily hours must equal

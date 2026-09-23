@@ -14,6 +14,7 @@ QUICK_ACTIONS = {
     "authorize_early_exit",
     "override_availability",
     "authorize_single_classe_day",
+    "authorize_friday_late_start",
 }
 
 

@@ -47,6 +47,7 @@ const QUICK_ACTIONS = [
   { action_type: "authorize_early_exit", label: "Autorizza uscita anticipata" },
   { action_type: "override_availability", label: "Deroga disponibilità" },
   { action_type: "authorize_single_classe_day", label: "Autorizza giornata mono-classe" },
+  { action_type: "authorize_friday_late_start", label: "Autorizza inizio posticipato di venerdì" },
 ];
 
 // generate/regenerate, modify-slot and apply-quick-action all reply with
