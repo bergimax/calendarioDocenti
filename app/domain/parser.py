@@ -590,7 +590,19 @@ class SchoolRosterParser:
                         if not data:
                             continue
 
-                        header = data[0]
+                        # The header row (class-name columns) is usually data[0], but
+                        # some PDFs render the page title as an extra leading table row
+                        # (a single merged cell, everything else None) - detect the real
+                        # header as the first row with several non-empty cells from
+                        # column 2 onward, rather than assuming it's always row 0.
+                        header_idx = next(
+                            (
+                                idx for idx, row in enumerate(data)
+                                if sum(1 for cell in row[2:] if cell and cell.strip()) >= 2
+                            ),
+                            0,
+                        )
+                        header = data[header_idx]
                         classe_columns = [
                             (idx, cell.strip())
                             for idx, cell in enumerate(header)
@@ -603,7 +615,7 @@ class SchoolRosterParser:
                             ]
 
                         current_giorno: Optional[str] = None
-                        for row in data[1:]:
+                        for row in data[header_idx + 1:]:
                             giorno = SchoolRosterParser._normalize_giorno(row[0] if row else None)
                             if giorno:
                                 current_giorno = giorno
