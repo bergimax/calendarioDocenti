@@ -48,6 +48,7 @@ const QUICK_ACTIONS = [
   { action_type: "override_availability", label: "Deroga disponibilità" },
   { action_type: "authorize_single_classe_day", label: "Autorizza giornata mono-classe" },
   { action_type: "authorize_friday_late_start", label: "Autorizza inizio posticipato di venerdì" },
+  { action_type: "authorize_short_pratica_block", label: "Autorizza blocco pratica corto" },
 ];
 
 // generate/regenerate, modify-slot and apply-quick-action all reply with

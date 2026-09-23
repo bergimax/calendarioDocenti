@@ -15,6 +15,7 @@ QUICK_ACTIONS = {
     "override_availability",
     "authorize_single_classe_day",
     "authorize_friday_late_start",
+    "authorize_short_pratica_block",
 }
 
 

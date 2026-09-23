@@ -117,7 +117,7 @@ class SoftPenalty:
     """
     var: Any  # cp_model IntVar; > 0 in the solution means this is violated
     weight: int
-    kind: str  # "teoria_consecutive" | "ore_target_deviation" | "contractor_gap" | "classe_late_start" | "availability_override" | "single_classe_day" | "friday_late_start_override"
+    kind: str  # "teoria_consecutive" | "ore_target_deviation" | "contractor_gap" | "classe_late_start" | "availability_override" | "single_classe_day" | "friday_late_start_override" | "pratica_block_override"
     description: str
     classe_id: Optional[str] = None
     docente_id: Optional[str] = None
@@ -239,6 +239,11 @@ class ScheduleSolver:
         # Hard 2d: Friday must start at 8:00 (relaxable at an extreme
         # weight, see _constraint_friday_start_at_8's docstring)
         self._constraint_friday_start_at_8()
+
+        # Hard 2e: PRATICA hours must form one >=3h contiguous block, or
+        # none at all (relaxable at an extreme weight, see
+        # _constraint_pratica_block_min_3h's docstring)
+        self._constraint_pratica_block_min_3h()
 
         # Hard 3: Paired classes
         self._constraint_paired_classes()
@@ -778,9 +783,6 @@ class ScheduleSolver:
         # Soft 1: Max 2 ore teoria consecutive (weight 10)
         self._soft_teoria_consecutive()
 
-        # Soft 2: Blocchi pratica 3-6 ore (weight 8)
-        self._soft_pratica_blocks()
-
         # Soft 3: Minimize deviation from ore_target per assegnazione (weight 15)
         self._soft_ore_target_deviation()
 
@@ -898,30 +900,42 @@ class ScheduleSolver:
                             suggested_action={"action_type": "force_3_hours_theory", "label": "Forza 3 ore teoria"},
                         ))
 
-    def _soft_pratica_blocks(self) -> None:
+    def _constraint_pratica_block_min_3h(self) -> None:
         """
-        Soft: PRATICA/laboratorio hours should form one 3-6 hour block per
-        day per assegnazione (specs.md 4.1: "blocchi da 3 a 6 ore, adattati
-        alla capienza massima del giorno se la giornata è corta"), not
-        scattered single hours through the week.
+        Hard constraint 2e, but relaxable: PRATICA/laboratorio hours must
+        form one contiguous block of at least min(3, day_cap) hours per day
+        per assegnazione, or none at all that day - admin decision
+        (2026-09-23): "almeno 3 ore di laboratorio di fila, oppure nulla",
+        top priority. Promotes the two penalties the old weight-8
+        `_soft_pratica_blocks` used to just discourage (specs.md 4.1:
+        "blocchi da 3 a 6 ore, adattati alla capienza massima del giorno se
+        la giornata è corta") into a near-hard requirement, same
+        relaxable-hard pattern as _constraint_friday_start_at_8 /
+        _constraint_teacher_availability: one override bool var per
+        (assegnazione, giorno) at RELAX_WEIGHT (1000, an order of magnitude
+        above every ordinary soft weight) lets the solver break it only
+        when truly unavoidable, surfaced via get_conflicts() with an
+        "authorize_short_pratica_block" suggested_action/deroga - an admin
+        must explicitly grant permission, never a silent short/scattered
+        block.
 
-        Two complementary penalties approximate "one contiguous block in
-        [3,6]" without a full interval-scheduling formulation:
+        Two complementary conditions approximate "one contiguous block in
+        [3,6]" without a full interval-scheduling formulation (same idiom
+        as before, now both gated by the same override var):
         1. the day's total hours for this assegnazione, if any are
-           scheduled that day at all, penalized for falling below
-           min(3, day_cap) - day_cap adapts the target down on a short
-           day. There's no symmetric "too long" check: this assegnazione's
-           hours that day are already a subset of the classe's daily
-           total, which _constraint_day_capacity hard-caps at day_cap
-           (<=6, the whole 08:00-14:00 window), so a block exceeding 6h
-           can't occur in the first place;
-        2. a "hole": an hour with practice both immediately before and
+           scheduled that day at all, must not fall below min(3, day_cap) -
+           day_cap adapts the target down on a short day. There's no
+           symmetric "too long" check: this assegnazione's hours that day
+           are already a subset of the classe's daily total, which
+           _constraint_day_capacity hard-caps at day_cap (<=6, the whole
+           08:00-14:00 window), so a block exceeding 6h can't occur in the
+           first place;
+        2. no "hole": an hour with practice both immediately before and
            after it but not itself scheduled - same gap-detection idiom as
-           _soft_contractor_gaps - penalizes scattering the day's hours
-           into disconnected pieces even when the total is already within
-           range.
+           _soft_contractor_gaps - forbids scattering the day's hours into
+           disconnected pieces even when the total is already within range.
         """
-        weight = 8
+        RELAX_WEIGHT = 1000
 
         pratica_asgs = [asg for asg in self.context.assegnazioni if asg.materia_tipo == "PRATICA"]
 
@@ -935,10 +949,15 @@ class ScheduleSolver:
                 if not hours:
                     continue
 
+                if self._deroga_active("authorize_short_pratica_block", classe_id=asg.classe_id):
+                    continue
+
                 day_cap = self._ore_max_for_classe_giorno(asg.classe_id, giorno)
                 low = min(3, day_cap)
                 ore_in_day = sum(hours)
                 giorno_nome = GIORNI_NOMI_IT[GiornoEnum(giorno).name]
+
+                relax = self.model.NewBoolVar(f"pratica_block_override_{asg.assegnazione_id}_{giorno}")
 
                 # Too-short block, only counted on a day this assegnazione
                 # actually has practice hours at all (a day with none
@@ -950,11 +969,7 @@ class ScheduleSolver:
                 too_short = self.model.NewIntVar(0, 6, f"pratica_short_{asg.assegnazione_id}_{giorno}")
                 self.model.Add(too_short >= low - ore_in_day).OnlyEnforceIf(used)
                 self.model.Add(too_short == 0).OnlyEnforceIf(used.Not())
-                self.soft_penalties.append(SoftPenalty(
-                    var=too_short, weight=weight, kind="pratica_block_short",
-                    description=f"Blocco pratica troppo corto per {asg.classe_nome}/{asg.materia_nome} ({giorno_nome})",
-                    classe_id=asg.classe_id, giorno=giorno,
-                ))
+                self.model.Add(too_short == 0).OnlyEnforceIf(relax.Not())
 
                 # Holes inside an otherwise-active span.
                 for ora in range(1, 5):
@@ -964,11 +979,21 @@ class ScheduleSolver:
                     if before in self.x and here in self.x and after in self.x:
                         hole = self.model.NewIntVar(0, 1, f"pratica_hole_{asg.assegnazione_id}_{giorno}_{ora}")
                         self.model.Add(hole >= self.x[before] + self.x[after] - 1 - self.x[here])
-                        self.soft_penalties.append(SoftPenalty(
-                            var=hole, weight=weight, kind="pratica_block_gap",
-                            description=f"Ore di pratica non contigue per {asg.classe_nome}/{asg.materia_nome} ({giorno_nome})",
-                            classe_id=asg.classe_id, giorno=giorno,
-                        ))
+                        self.model.Add(hole == 0).OnlyEnforceIf(relax.Not())
+
+                self.soft_penalties.append(SoftPenalty(
+                    var=relax, weight=RELAX_WEIGHT, kind="pratica_block_override",
+                    description=(
+                        f"Blocco pratica corto/non contiguo per {asg.classe_nome}/{asg.materia_nome} "
+                        f"({giorno_nome}): nessun'altra combinazione permetteva un blocco di almeno "
+                        f"{low}h consecutive"
+                    ),
+                    classe_id=asg.classe_id, giorno=giorno,
+                    suggested_action={
+                        "action_type": "authorize_short_pratica_block",
+                        "label": "Autorizza blocco pratica corto",
+                    },
+                ))
 
     def _soft_ore_target_deviation(self) -> None:
         """Soft: Minimize deviation from target hours per assegnazione (weight 15)."""

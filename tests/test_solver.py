@@ -207,13 +207,15 @@ def test_monte_ore_limit_is_not_exceeded():
 
 def test_pratica_hours_scattered_across_a_day_score_worse_than_a_block():
     """
-    Soft constraint 2 (specs.md 4.1: PRATICA/laboratorio hours should form
-    blocchi da 3 a 6 ore). _soft_pratica_blocks used to be a no-op stub
-    that added no penalties at all, so a scattered pattern and a proper
-    block scored identically. Compare the same 3 total hours laid out as
-    three isolated single hours vs. one contiguous block: the block must
-    score strictly higher, and only the scattered layout should surface a
-    "pratica_block_gap" conflict.
+    Hard constraint 2e, relaxable (specs.md 4.1: PRATICA/laboratorio hours
+    should form blocchi da 3 a 6 ore; admin decision 2026-09-23: "almeno 3
+    ore di laboratorio di fila, oppure nulla" - promoted from a plain soft
+    preference to a near-hard requirement with an override var at
+    RELAX_WEIGHT). Compare the same 3 total hours laid out as three
+    isolated single hours vs. one contiguous block: the block must score
+    strictly higher, and only the scattered layout should surface a
+    "pratica_block_override" conflict (the override the solver was forced
+    to take to keep those fixed, non-contiguous hours feasible).
     """
     assegnazioni = [
         AssegnazioneDati("a1", "d1", "Prof Bianchi", "ASSUNTO", "c1", "1A", "m2", "Lab",
@@ -232,7 +234,7 @@ def test_pratica_hours_scattered_across_a_day_score_worse_than_a_block():
     contiguous_score, _, _ = contiguous.calculate_quality_score()
 
     assert contiguous_score > scattered_score
-    assert any(c["conflict_id"].startswith("pratica_block_gap") for c in scattered.get_conflicts())
+    assert any(c["conflict_id"].startswith("pratica_block_override") for c in scattered.get_conflicts())
     assert not any(c["conflict_id"].startswith("pratica_block") for c in contiguous.get_conflicts())
 
 
@@ -262,7 +264,7 @@ def test_pratica_short_isolated_hour_is_flagged_too_short():
     assert solver.solve_fixed(assigned_keys) in ("OPTIMAL", "FEASIBLE")
 
     conflicts = solver.get_conflicts()
-    assert any(c["conflict_id"].startswith("pratica_block_short") for c in conflicts)
+    assert any(c["conflict_id"].startswith("pratica_block_override") for c in conflicts)
 
 
 def test_soft_constraint_weights_are_applied_to_objective():
