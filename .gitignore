@@ -7,3 +7,7 @@ venv/
 .env
 *.db
 Documenti/
+
+# Exported timetables
+orario_*.pdf
+orario_*.xlsx
