@@ -100,6 +100,7 @@ export interface ClassPairing {
   classe_a_id: string;
   classe_b_id: string;
   materia_id: string;
+  docente_id?: string;
 }
 
 export interface CalendarEntry {
@@ -125,6 +126,7 @@ export interface SlotLezione {
   classe_accoppiata_id?: string;
   materia_tipo?: "TEORIA" | "PRATICA";
   conflitto?: boolean;
+  indisponibile?: boolean;
   materia_nome?: string;
   docente_nome?: string;
   classe_nome?: string;

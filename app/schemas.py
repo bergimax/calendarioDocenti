@@ -183,6 +183,8 @@ class SlotLezioneResponse(BaseModel):
     ora_fine: int
     accoppiata: bool
     classe_accoppiata_id: Optional[str] = None
+    conflitto: bool = False
+    indisponibile: bool = False
 
     class Config:
         from_attributes = True

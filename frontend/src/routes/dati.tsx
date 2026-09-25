@@ -8,7 +8,7 @@ export const Route = createFileRoute("/dati")({
       {
         name: "description",
         content:
-          "Gestione di calendario, docenti, classi, materie, assegnazioni e accoppiamenti dell'istituto.",
+          "Gestione di calendario, docenti, classi, assegnazioni e accoppiamenti dell'istituto.",
       },
       { property: "og:title", content: "Dati scuola · Orario scolastico" },
       {
@@ -25,7 +25,6 @@ const TABS = [
   { to: "/dati/calendario", label: "Calendario", exact: false },
   { to: "/dati/docenti", label: "Docenti", exact: false },
   { to: "/dati/classi", label: "Classi", exact: false },
-  { to: "/dati/materie", label: "Materie", exact: false },
   { to: "/dati/assegnazioni", label: "Assegnazioni", exact: false },
   { to: "/dati/accoppiamenti", label: "Accoppiamenti", exact: false },
 ] as const;

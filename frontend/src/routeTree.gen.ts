@@ -21,7 +21,6 @@ import { Route as DatiAssegnazioniRouteImport } from './routes/dati.assegnazioni
 import { Route as DatiCalendarioRouteImport } from './routes/dati.calendario'
 import { Route as DatiClassiRouteImport } from './routes/dati.classi'
 import { Route as DatiDocentiRouteImport } from './routes/dati.docenti'
-import { Route as DatiMaterieRouteImport } from './routes/dati.materie'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -83,11 +82,6 @@ const DatiDocentiRoute = DatiDocentiRouteImport.update({
   path: '/docenti',
   getParentRoute: () => DatiRoute,
 } as any)
-const DatiMaterieRoute = DatiMaterieRouteImport.update({
-  id: '/materie',
-  path: '/materie',
-  getParentRoute: () => DatiRoute,
-} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -101,7 +95,6 @@ export interface FileRoutesByFullPath {
   '/dati/calendario': typeof DatiCalendarioRoute
   '/dati/classi': typeof DatiClassiRoute
   '/dati/docenti': typeof DatiDocentiRoute
-  '/dati/materie': typeof DatiMaterieRoute
   '/dati/': typeof DatiIndexRoute
 }
 export interface FileRoutesByTo {
@@ -115,7 +108,6 @@ export interface FileRoutesByTo {
   '/dati/calendario': typeof DatiCalendarioRoute
   '/dati/classi': typeof DatiClassiRoute
   '/dati/docenti': typeof DatiDocentiRoute
-  '/dati/materie': typeof DatiMaterieRoute
   '/dati': typeof DatiIndexRoute
 }
 export interface FileRoutesById {
@@ -131,7 +123,6 @@ export interface FileRoutesById {
   '/dati/calendario': typeof DatiCalendarioRoute
   '/dati/classi': typeof DatiClassiRoute
   '/dati/docenti': typeof DatiDocentiRoute
-  '/dati/materie': typeof DatiMaterieRoute
   '/dati/': typeof DatiIndexRoute
 }
 export interface FileRouteTypes {
@@ -148,7 +139,6 @@ export interface FileRouteTypes {
     | '/dati/calendario'
     | '/dati/classi'
     | '/dati/docenti'
-    | '/dati/materie'
     | '/dati/'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -162,7 +152,6 @@ export interface FileRouteTypes {
     | '/dati/calendario'
     | '/dati/classi'
     | '/dati/docenti'
-    | '/dati/materie'
     | '/dati'
   id:
     | '__root__'
@@ -177,7 +166,6 @@ export interface FileRouteTypes {
     | '/dati/calendario'
     | '/dati/classi'
     | '/dati/docenti'
-    | '/dati/materie'
     | '/dati/'
   fileRoutesById: FileRoutesById
 }
@@ -276,13 +264,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof DatiDocentiRouteImport
       parentRoute: typeof DatiRoute
     }
-    '/dati/materie': {
-      id: '/dati/materie'
-      path: '/materie'
-      fullPath: '/dati/materie'
-      preLoaderRoute: typeof DatiMaterieRouteImport
-      parentRoute: typeof DatiRoute
-    }
   }
 }
 
@@ -292,7 +273,6 @@ interface DatiRouteChildren {
   DatiCalendarioRoute: typeof DatiCalendarioRoute
   DatiClassiRoute: typeof DatiClassiRoute
   DatiDocentiRoute: typeof DatiDocentiRoute
-  DatiMaterieRoute: typeof DatiMaterieRoute
   DatiIndexRoute: typeof DatiIndexRoute
 }
 
@@ -302,7 +282,6 @@ const DatiRouteChildren: DatiRouteChildren = {
   DatiCalendarioRoute: DatiCalendarioRoute,
   DatiClassiRoute: DatiClassiRoute,
   DatiDocentiRoute: DatiDocentiRoute,
-  DatiMaterieRoute: DatiMaterieRoute,
   DatiIndexRoute: DatiIndexRoute,
 }
 

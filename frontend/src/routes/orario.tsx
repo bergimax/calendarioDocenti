@@ -7,6 +7,28 @@ import { ErrorState, LoadingState } from "@/components/States";
 import { API_BASE_URL, api, apiErrorMessage } from "@/lib/api";
 import type { ChatMessage, Conflict, Schedule, SlotLezione, Teacher, Week } from "@/lib/types";
 
+// Column order for the weekly grid: group by corso (info, ele, este, pan,
+// itc - school's own requested order), then by anno within each corso.
+// "PAN." (not the full "PAN. E PAST.") because one class in the DB is named
+// "III PAN. E PAST" without the trailing period - see classe_sort test.
+const CORSO_ORDER = ["OP. INFORM.", "ELETTRICISTI", "ESTETISTE", "PAN.", "I.T.C."];
+const ANNO_ORDER: Record<string, number> = { IV: 4, III: 3, II: 2, I: 1 };
+
+function classeSortKey(nome: string): [number, number] {
+  const corsoIdx = CORSO_ORDER.findIndex((c) => nome.includes(c));
+  const annoMatch = nome.match(/^(IV|III|II|I)\b/);
+  const annoIdx = annoMatch?.[1] ? (ANNO_ORDER[annoMatch[1]] ?? 99) : 99;
+  return [corsoIdx === -1 ? CORSO_ORDER.length : corsoIdx, annoIdx];
+}
+
+function sortClassi<T extends { nome: string }>(classi: T[]): T[] {
+  return [...classi].sort((a, b) => {
+    const [ac, ay] = classeSortKey(a.nome);
+    const [bc, by] = classeSortKey(b.nome);
+    return ac - bc || ay - by;
+  });
+}
+
 export const Route = createFileRoute("/orario")({
   head: () => ({
     meta: [
@@ -94,12 +116,12 @@ function SchedulePage() {
   const classi = useMemo(() => {
     if (!active) return [] as { id: string; nome: string }[];
     if (active.classes?.length) {
-      return active.classes.map((c) => ({ id: c.classe_id, nome: c.nome }));
+      return sortClassi(active.classes.map((c) => ({ id: c.classe_id, nome: c.nome })));
     }
     const seen = new Map<string, string>();
     for (const s of active.slots) seen.set(s.classe_id, s.classe_nome ?? s.classe_id);
     for (const sc of active.stage_cells ?? []) seen.set(sc.classe_id, sc.classe_nome ?? sc.classe_id);
-    return [...seen].map(([id, nome]) => ({ id, nome }));
+    return sortClassi([...seen].map(([id, nome]) => ({ id, nome })));
   }, [active]);
 
   async function generate(endpoint: "generate" | "regenerate") {
@@ -268,15 +290,15 @@ function SchedulePage() {
         <div className="flex items-center gap-4 font-mono text-[11px] text-muted-foreground">
           <span className="flex items-center gap-1.5">
             <i className="size-2.5 rounded-sm border border-theory bg-theory/20" />
-            Teoria
-          </span>
-          <span className="flex items-center gap-1.5">
-            <i className="size-2.5 rounded-sm border border-practical bg-practical/20" />
-            Pratica
+            Lezione
           </span>
           <span className="flex items-center gap-1.5">
             <i className="size-2.5 rounded-sm border border-conflict bg-conflict/20" />
             Conflitto
+          </span>
+          <span className="flex items-center gap-1.5">
+            <i className="size-2.5 rounded-sm border border-unavailable bg-unavailable/20" />
+            Docente indisponibile
           </span>
           <span className="flex items-center gap-1.5">
             <i className="size-2.5 rounded-sm border border-dashed border-edge" />
@@ -418,112 +440,114 @@ function ScheduleTable({
           </button>
         ))}
       </div>
-      <table className="w-full border-collapse text-[11px]">
-        <thead>
-          <tr className="bg-muted font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
-            <th className="w-16 border-b border-edge px-3 py-2 text-left font-medium">Ora</th>
-            {classi.map((c) => (
-              <th key={c.id} className="border-b border-edge px-3 py-2 text-left font-medium">
-                {c.nome}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {ORE.map((ora) => {
-            const skip = new Set<string>();
-            const { cellSlots, groupOf } = groupForHour(ora);
-            return (
-              <tr key={ora}>
-                <td className="border-b border-edge px-3 py-2 font-mono text-muted-foreground">
-                  {ora}
-                </td>
-                {classi.map((c) => {
-                  if (skip.has(c.id)) return null;
-                  if (stageClassi.has(c.id)) {
-                    return (
-                      <td key={c.id} className="border-b border-edge px-2 py-2">
-                        <div className="rounded-md border border-warn bg-warn/20 px-2 py-1 text-center font-semibold text-warn">
-                          STAGE
-                        </div>
-                      </td>
-                    );
-                  }
-                  const slot = cellSlots.get(c.id);
-                  if (!slot) {
-                    return (
-                      <td key={c.id} className="border-b border-edge px-2 py-2">
-                        <div className="rounded-md border border-dashed border-edge bg-card px-2 py-1 text-muted-foreground">
-                          Libera
-                        </div>
-                      </td>
-                    );
-                  }
-                  const group = groupOf.get(c.id) ?? [c.id];
-                  let colSpan = 1;
-                  if (group.length > 1) {
-                    const indices = group
-                      .map((id) => classeIndex.get(id) as number)
-                      .sort((a, b) => a - b);
-                    const first = indices[0] as number;
-                    const contiguous = indices.every((idx, i) => idx === first + i);
-                    // Only merge into one cell when the group is an unbroken
-                    // run of columns; otherwise leave each classe its own
-                    // cell rather than risk an invalid colSpan.
-                    if (contiguous) {
-                      colSpan = group.length;
-                      for (const id of group) if (id !== c.id) skip.add(id);
+      <div className="overflow-x-auto">
+        <table className="w-full border-collapse text-[11px]">
+          <thead>
+            <tr className="bg-muted font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+              <th className="w-16 border-b border-edge px-3 py-2 text-left font-medium">Ora</th>
+              {classi.map((c) => (
+                <th key={c.id} className="border-b border-edge px-3 py-2 text-left font-medium">
+                  {c.nome}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {ORE.map((ora) => {
+              const skip = new Set<string>();
+              const { cellSlots, groupOf } = groupForHour(ora);
+              return (
+                <tr key={ora}>
+                  <td className="border-b border-edge px-3 py-2 font-mono text-muted-foreground">
+                    {ora}
+                  </td>
+                  {classi.map((c) => {
+                    if (skip.has(c.id)) return null;
+                    if (stageClassi.has(c.id)) {
+                      return (
+                        <td key={c.id} className="border-b border-edge px-2 py-2">
+                          <div className="rounded-md border border-warn bg-warn/20 px-2 py-1 text-center font-semibold text-warn">
+                            STAGE
+                          </div>
+                        </td>
+                      );
                     }
-                  }
-                  const paired = colSpan > 1;
-                  const tone = slot.conflitto
-                    ? "border-conflict bg-conflict/10"
-                    : slot.materia_tipo === "PRATICA"
-                      ? "border-practical bg-practical/10"
-                      : "border-theory bg-theory/10";
-                  const dimmed =
-                    highlightTeacher && slot.docente_id !== highlightTeacher ? "opacity-35" : "";
-                  return (
-                    <td
-                      key={c.id}
-                      colSpan={colSpan}
-                      className="border-b border-edge px-2 py-2"
-                    >
-                      <button
-                        type="button"
-                        onClick={() => onSelectSlot(slot)}
-                        title={`Monte ore residuo non disponibile senza backend`}
-                        className={`w-full rounded-md border-l-2 px-2 py-1 text-left transition-opacity ${tone} ${dimmed}`}
+                    const slot = cellSlots.get(c.id);
+                    if (!slot) {
+                      return (
+                        <td key={c.id} className="border-b border-edge px-2 py-2">
+                          <div className="rounded-md border border-dashed border-edge bg-card px-2 py-1 text-muted-foreground">
+                            Libera
+                          </div>
+                        </td>
+                      );
+                    }
+                    const group = groupOf.get(c.id) ?? [c.id];
+                    let colSpan = 1;
+                    if (group.length > 1) {
+                      const indices = group
+                        .map((id) => classeIndex.get(id) as number)
+                        .sort((a, b) => a - b);
+                      const first = indices[0] as number;
+                      const contiguous = indices.every((idx, i) => idx === first + i);
+                      // Only merge into one cell when the group is an unbroken
+                      // run of columns; otherwise leave each classe its own
+                      // cell rather than risk an invalid colSpan.
+                      if (contiguous) {
+                        colSpan = group.length;
+                        for (const id of group) if (id !== c.id) skip.add(id);
+                      }
+                    }
+                    const paired = colSpan > 1;
+                    const tone = slot.indisponibile
+                      ? "border-unavailable bg-unavailable/15"
+                      : slot.conflitto
+                        ? "border-conflict bg-conflict/10"
+                        : "border-theory bg-theory/10";
+                    const dimmed =
+                      highlightTeacher && slot.docente_id !== highlightTeacher ? "opacity-35" : "";
+                    return (
+                      <td
+                        key={c.id}
+                        colSpan={colSpan}
+                        className="border-b border-edge px-2 py-2"
                       >
-                        <span
-                          role="link"
-                          tabIndex={0}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            onHighlightTeacher(
-                              highlightTeacher === slot.docente_id ? null : slot.docente_id,
-                            );
-                          }}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter") {
-                              e.stopPropagation();
-                              onHighlightTeacher(slot.docente_id);
-                            }
-                          }}
-                          className="font-semibold underline-offset-2 hover:underline"
+                        <button
+                          type="button"
+                          onClick={() => onSelectSlot(slot)}
+                          title={`Monte ore residuo non disponibile senza backend`}
+                          className={`w-full rounded-md border-l-2 px-2 py-1 text-left transition-opacity ${tone} ${dimmed}`}
                         >
-                          {slot.docente_nome ?? slot.docente_id}
-                          {paired ? " · accoppiata" : ""}
-                        </span>
-                      </button>
-                    </td>
-                  );
-                })}
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
+                          <span
+                            role="link"
+                            tabIndex={0}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onHighlightTeacher(
+                                highlightTeacher === slot.docente_id ? null : slot.docente_id,
+                              );
+                            }}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") {
+                                e.stopPropagation();
+                                onHighlightTeacher(slot.docente_id);
+                              }
+                            }}
+                            className="font-semibold underline-offset-2 hover:underline"
+                          >
+                            {slot.docente_nome ?? slot.docente_id}
+                            {paired ? " · accoppiata" : ""}
+                          </span>
+                        </button>
+                      </td>
+                    );
+                  })}
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
@@ -547,6 +571,8 @@ function SidePanel({
   onCloseSlot: () => void;
   onSlotUpdated: (s: Schedule) => void;
 }) {
+  const [confirmingId, setConfirmingId] = useState<string | null>(null);
+
   return (
     <>
       <div className="flex items-center gap-2 border-b border-edge px-4 py-3">
@@ -573,13 +599,38 @@ function SidePanel({
               <div key={c.conflict_id} className="rounded-lg bg-conflict/5 p-2 ring-1 ring-conflict/20">
                 <div className="text-xs font-semibold text-conflict">{c.description}</div>
                 {c.suggested_action ? (
-                  <button
-                    type="button"
-                    onClick={() => onQuickAction(c.suggested_action!.action_type)}
-                    className="mt-1 text-[11px] font-semibold text-brand"
-                  >
-                    {c.suggested_action.label}
-                  </button>
+                  confirmingId === c.conflict_id ? (
+                    <div className="mt-1 flex items-center gap-2 text-[11px]">
+                      <span className="text-muted-foreground">
+                        Applicare &ldquo;{c.suggested_action.label}&rdquo;?
+                      </span>
+                      <button
+                        type="button"
+                        className="font-semibold text-conflict"
+                        onClick={() => {
+                          setConfirmingId(null);
+                          onQuickAction(c.suggested_action!.action_type);
+                        }}
+                      >
+                        Sì
+                      </button>
+                      <button
+                        type="button"
+                        className="font-semibold text-muted-foreground"
+                        onClick={() => setConfirmingId(null)}
+                      >
+                        Annulla
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => setConfirmingId(c.conflict_id)}
+                      className="mt-1 text-[11px] font-semibold text-brand"
+                    >
+                      {c.suggested_action.label}
+                    </button>
+                  )
                 ) : null}
               </div>
             ))

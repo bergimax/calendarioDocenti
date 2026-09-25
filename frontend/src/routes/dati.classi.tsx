@@ -14,10 +14,7 @@ function ClassesPage() {
       endpoint="/api/classes"
       idKey="classe_id"
       emptyHint="Nessuna classe restituita dal server."
-      columns={[
-        { key: "nome", header: "Classe", render: (r) => r.nome },
-        { key: "n_studenti", header: "N. studenti", render: (r) => r.n_studenti ?? "—" },
-      ]}
+      columns={[{ key: "nome", header: "Classe", render: (r) => r.nome }]}
       form={({ value, set }) => (
         <>
           <Field
@@ -25,12 +22,6 @@ function ClassesPage() {
             value={value["nome"] ?? ""}
             onChange={(e) => set("nome", e.target.value)}
             placeholder="1A"
-          />
-          <Field
-            label="N. studenti"
-            type="number"
-            value={value["n_studenti"] ?? ""}
-            onChange={(e) => set("n_studenti", e.target.value)}
           />
         </>
       )}

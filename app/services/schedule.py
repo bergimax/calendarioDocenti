@@ -74,6 +74,9 @@ class ScheduleService:
 
                 # Calculate quality
                 quality_score, quality_level, n_conflicts = solver.calculate_quality_score()
+                conflicts = solver.get_conflicts()
+                self._mark_slot_conflicts(slots, conflicts)
+                self._mark_slot_unavailability(slots, scuola_id, week_start)
 
                 # Save to DB
                 schedule_id = self.repo.save_generated_schedule(
@@ -101,6 +104,8 @@ class ScheduleService:
                         ora_fine=s["ora_fine"],
                         accoppiata=s["accoppiata"],
                         classe_accoppiata_id=s.get("classe_accoppiata_id"),
+                        conflitto=s.get("conflitto", False),
+                        indisponibile=s.get("indisponibile", False),
                     )
                     for s in slots
                 ]
@@ -114,7 +119,7 @@ class ScheduleService:
                     quality_level=quality_level,
                     n_soft_conflicts=n_conflicts,
                     slots=slot_responses,
-                    conflicts=solver.get_conflicts(),
+                    conflicts=conflicts,
                 )
 
             elif status == "INFEASIBLE":
@@ -168,7 +173,10 @@ class ScheduleService:
         if not schedule:
             return None
 
-        return {"status": "found", "conflicts": self._conflicts_for_persisted_schedule(scuola_id, week_start, schedule), **schedule}
+        conflicts = self._conflicts_for_persisted_schedule(scuola_id, week_start, schedule)
+        self._mark_slot_conflicts(schedule["slots"], conflicts)
+        self._mark_slot_unavailability(schedule["slots"], scuola_id, week_start)
+        return {"status": "found", "conflicts": conflicts, **schedule}
 
     def _conflicts_for_persisted_schedule(
         self, scuola_id: str, week_start: date, schedule: Dict[str, Any],
@@ -208,6 +216,62 @@ class ScheduleService:
         return solver.get_conflicts()
 
     # ===== Helper Methods =====
+
+    @staticmethod
+    def _mark_slot_conflicts(slots: List[Dict[str, Any]], conflicts: List[Dict[str, Any]]) -> None:
+        """
+        Set each slot dict's "conflitto" key in place (frontend/src/routes/
+        orario.tsx colors the cell red on it) when the slot falls within the
+        scope - (classe_id or docente_id) + giorno - of one of `conflicts`
+        (see ScheduleSolver.get_conflicts). Without this, conflicts were only
+        ever visible in the sidebar list, never on the grid itself.
+        """
+        scopes = [
+            (c.get("classe_id"), c.get("docente_id"), c.get("giorno"))
+            for c in conflicts
+            if c.get("giorno") and (c.get("classe_id") or c.get("docente_id"))
+        ]
+        for s in slots:
+            s["conflitto"] = any(
+                s.get("giorno") == giorno
+                and ((classe_id and s.get("classe_id") == classe_id)
+                     or (docente_id and s.get("docente_id") == docente_id))
+                for classe_id, docente_id, giorno in scopes
+            )
+
+    def _mark_slot_unavailability(
+        self, slots: List[Dict[str, Any]], scuola_id: str, week_start: date,
+    ) -> None:
+        """
+        Set each slot dict's "indisponibile" key in place: True when the
+        docente's recorded disponibilita for that exact giorno + hour is
+        marked unavailable. Checked per hour straight against the stored
+        availability (not via soft conflicts, which are scoped to a whole
+        docente/classe + day), so the grid can tell a real availability
+        violation apart from any other conflict. Docenti with no record
+        (ASSUNTO, implicitly 8-14) are never flagged.
+        """
+        from app.models import DisponibilitaSettimanale
+
+        unavailable = set()
+        rows = self.db.query(DisponibilitaSettimanale).filter(
+            DisponibilitaSettimanale.scuola_id == scuola_id,
+            DisponibilitaSettimanale.settimana_inizio == week_start,
+        ).all()
+        for row in rows:
+            for giorno, fasce in (row.giorni_fasce or {}).items():
+                for f in fasce:
+                    if f.get("disponibile", True):
+                        continue
+                    try:
+                        unavailable.add((row.docente_id, giorno.upper(), int(f["ora_inizio"].split(":")[0])))
+                    except (ValueError, KeyError, AttributeError):
+                        continue
+        for s in slots:
+            s["indisponibile"] = any(
+                (s["docente_id"], str(s["giorno"]).upper(), h) in unavailable
+                for h in range(s["ora_inizio"], s["ora_fine"])
+            )
 
     def _identify_conflicts(self, context) -> list:
         """
@@ -447,7 +511,10 @@ class ScheduleService:
         self.db.commit()
 
         updated = self.repo.get_schedule_by_week(scuola_id, week_start)
-        return {"status": "modified", "conflicts": solver.get_conflicts(), **updated}
+        conflicts = solver.get_conflicts()
+        self._mark_slot_conflicts(updated["slots"], conflicts)
+        self._mark_slot_unavailability(updated["slots"], scuola_id, week_start)
+        return {"status": "modified", "conflicts": conflicts, **updated}
 
     def apply_quick_action(
         self,
@@ -635,7 +702,10 @@ class ScheduleService:
             return {"status": "error", "message": str(e)}
 
         updated = self.repo.get_schedule_by_week(scuola_id, week_start)
-        return {"status": success_status, "conflicts": solver.get_conflicts(), **updated}
+        conflicts = solver.get_conflicts()
+        self._mark_slot_conflicts(updated["slots"], conflicts)
+        self._mark_slot_unavailability(updated["slots"], scuola_id, week_start)
+        return {"status": success_status, "conflicts": conflicts, **updated}
 
     def export_pdf(self, scuola_id: str, week_start: date) -> Dict[str, Any]:
         """

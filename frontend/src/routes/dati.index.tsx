@@ -9,11 +9,10 @@ const SECTIONS = [
   { to: "/dati/calendario", label: "Calendario", desc: "Date, ore massime, chiusure e stage." },
   { to: "/dati/docenti", label: "Docenti", desc: "Anagrafica e tipologia contrattuale." },
   { to: "/dati/classi", label: "Classi", desc: "Elenco delle classi dell'istituto." },
-  { to: "/dati/materie", label: "Materie", desc: "Tipologia e peso cognitivo." },
   {
     to: "/dati/assegnazioni",
     label: "Assegnazioni",
-    desc: "Docente × classe × materia e monte ore.",
+    desc: "Docente × classe e monte ore.",
   },
   { to: "/dati/accoppiamenti", label: "Accoppiamenti", desc: "Classi in lezione congiunta." },
 ] as const;

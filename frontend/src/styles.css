@@ -46,6 +46,7 @@
   --color-theory: var(--theory);
   --color-practical: var(--practical);
   --color-conflict: var(--conflict);
+  --color-unavailable: var(--unavailable);
   --color-ok: var(--ok);
   --color-warn: var(--warn);
   --color-sidebar: var(--sidebar);
@@ -66,6 +67,7 @@
   --theory: oklch(0.545 0.239 266);
   --practical: oklch(0.649 0.111 186);
   --conflict: oklch(0.601 0.201 23);
+  --unavailable: oklch(0.65 0.19 310);
   --ok: oklch(0.63 0.13 160);
   --warn: oklch(0.75 0.15 75);
 

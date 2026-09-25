@@ -35,7 +35,7 @@ const CARDS = [
   {
     to: "/dati",
     title: "Dati scuola",
-    desc: "Calendario, docenti, classi, materie, assegnazioni, accoppiamenti.",
+    desc: "Calendario, docenti, classi, assegnazioni, accoppiamenti.",
   },
 ] as const;
 

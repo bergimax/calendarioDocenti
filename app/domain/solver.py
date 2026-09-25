@@ -1375,6 +1375,12 @@ class ScheduleSolver:
                 "conflict_id": f"{p.kind}_{p.classe_id or ''}_{p.docente_id or ''}_{p.giorno}_{i}",
                 "description": p.description,
                 "suggested_action": suggested_action,
+                # Scope so the frontend can highlight the offending cell(s) in
+                # the grid (SlotLezioneResponse.conflitto), not just list the
+                # conflict in the sidebar - see ScheduleService._mark_slot_conflicts.
+                "classe_id": p.classe_id,
+                "docente_id": p.docente_id,
+                "giorno": GiornoEnum(p.giorno).name if p.giorno is not None else None,
             })
 
         return conflicts

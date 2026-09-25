@@ -143,6 +143,17 @@ class SchoolDataService:
     def _materia_dict(m: Materia) -> Dict[str, Any]:
         return {"materia_id": m.id, "nome": m.nome, "tipo": m.tipo, "peso_cognitivo": m.peso_cognitivo}
 
+    def _default_materia_id(self, scuola_id: str) -> str:
+        """Fallback materia for assegnazioni/accoppiamenti created without one
+        picked in the UI (the "Dati scuola" forms no longer ask for materia -
+        it isn't meaningful for accoppiamenti, which are compresenza detected
+        from the calendar, not a shared subject - see
+        scripts/rederive_monte_ore_and_pairings.py)."""
+        materia = self.db.query(Materia).filter_by(scuola_id=scuola_id).first()
+        if not materia:
+            raise ValueError("No materia exists for this scuola - create one first")
+        return materia.id
+
     # ===== Assegnazioni (+ monte ore) =====
     # The "Dati scuola" page's single form conflates two tables: the
     # docente<->classe<->materia link (Assegnazione) and its annual hours
@@ -156,9 +167,9 @@ class SchoolDataService:
     def create_assegnazione(self, scuola_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
         docente_id = (data.get("docente_id") or "").strip()
         classe_id = (data.get("classe_id") or "").strip()
-        materia_id = (data.get("materia_id") or "").strip()
+        materia_id = (data.get("materia_id") or "").strip() or self._default_materia_id(scuola_id)
         if not (docente_id and classe_id and materia_id):
-            raise ValueError("docente_id, classe_id and materia_id are all required")
+            raise ValueError("docente_id and classe_id are required")
 
         asg = Assegnazione(
             scuola_id=scuola_id, docente_id=docente_id, classe_id=classe_id, materia_id=materia_id,
@@ -250,12 +261,13 @@ class SchoolDataService:
     def create_accoppiamento(self, scuola_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
         classe_a_id = (data.get("classe_a_id") or "").strip()
         classe_b_id = (data.get("classe_b_id") or "").strip()
-        materia_id = (data.get("materia_id") or "").strip()
+        materia_id = (data.get("materia_id") or "").strip() or self._default_materia_id(scuola_id)
         if not (classe_a_id and classe_b_id and materia_id):
-            raise ValueError("classe_a_id, classe_b_id and materia_id are all required")
+            raise ValueError("classe_a_id and classe_b_id are required")
 
         pairing = ClasseAccoppiata(
             scuola_id=scuola_id, classe_a_id=classe_a_id, classe_b_id=classe_b_id, materia_id=materia_id,
+            docente_id=(data.get("docente_id") or "").strip() or None,
             note=(data.get("note") or "").strip() or None,
         )
         self.db.add(pairing)
@@ -276,6 +288,8 @@ class SchoolDataService:
             pairing.classe_b_id = data["classe_b_id"].strip()
         if data.get("materia_id"):
             pairing.materia_id = data["materia_id"].strip()
+        if "docente_id" in data:
+            pairing.docente_id = (data.get("docente_id") or "").strip() or None
         if "note" in data:
             pairing.note = (data.get("note") or "").strip() or None
         self.db.commit()
@@ -295,6 +309,7 @@ class SchoolDataService:
             "classe_a_id": c.classe_a_id,
             "classe_b_id": c.classe_b_id,
             "materia_id": c.materia_id,
+            "docente_id": c.docente_id,
             "note": c.note,
         }
 

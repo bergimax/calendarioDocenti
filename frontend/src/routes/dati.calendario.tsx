@@ -29,7 +29,6 @@ function CalendarPage() {
           header: "Stage gruppo",
           render: (r) => (r.flag_stage_gruppo ? "Sì" : "No"),
         },
-        { key: "stage", header: "Stage classe", render: (r) => r.flag_stage_classe_id ?? "—" },
       ]}
       form={({ value, set }) => (
         <>
