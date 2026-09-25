@@ -120,6 +120,7 @@ class ScheduleService:
                     n_soft_conflicts=n_conflicts,
                     slots=slot_responses,
                     conflicts=conflicts,
+                    stage_cells=self.repo._stage_cells_for_week(scuola_id, week_start),
                 )
 
             elif status == "INFEASIBLE":

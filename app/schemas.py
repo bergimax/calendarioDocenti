@@ -210,6 +210,10 @@ class ScheduleGenerateResponse(BaseModel):
     # Itemized soft-constraint violations in the generated solution (see
     # ScheduleSolver.get_conflicts) - matches frontend/src/lib/types.ts's Conflict[].
     conflicts: Optional[List[Dict[str, Any]]] = None
+    # {classe_id, classe_nome, giorno} for classi on stage this week, so the
+    # grid can label them "STAGE" right after generate/regenerate too (the
+    # GET response already carries this; see ScheduleRepository._stage_cells_for_week).
+    stage_cells: Optional[List[Dict[str, Any]]] = None
 
 
 class ModifySlotRequest(BaseModel):
