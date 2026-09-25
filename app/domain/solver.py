@@ -117,7 +117,7 @@ class SoftPenalty:
     """
     var: Any  # cp_model IntVar; > 0 in the solution means this is violated
     weight: int
-    kind: str  # "teoria_consecutive" | "ore_target_deviation" | "contractor_gap" | "classe_late_start" | "availability_override" | "single_classe_day" | "friday_late_start_override" | "pratica_block_override"
+    kind: str  # "teoria_consecutive" | "ore_target_deviation" | "contractor_gap" | "classe_late_start" | "availability_override" | "single_classe_day" | "friday_late_start_override" | "pratica_block_override" | "classe_day_cap_override"
     description: str
     classe_id: Optional[str] = None
     docente_id: Optional[str] = None
@@ -255,6 +255,7 @@ class ScheduleSolver:
         # Hard 4: Teacher availability (relaxable at an extreme weight, see
         # _constraint_teacher_availability's docstring)
         self._constraint_teacher_availability()
+        self._constraint_max_hours_per_classe_day()
 
         # Hard 5: Exclude stage classes
         self._constraint_exclude_stage()
@@ -702,6 +703,72 @@ class ScheduleSolver:
                         "label": "Conferma disponibilità forzata",
                     },
                 ))
+
+    def _constraint_max_hours_per_classe_day(self) -> None:
+        """
+        Relaxable-hard: a docente teaches at most MAX_HOURS_PER_CLASSE_DAY
+        hours with the same classe on the same giorno (admin-observed
+        2026-09-25: a docente with 5h in one classe on a Monday, and only 1h
+        elsewhere, went out with no warning at all - _soft_avoid_single_classe_day
+        only catches a day that is ENTIRELY one classe, so 5h + 1h slipped
+        through). Applies to every docente with >=2 classi overall (a
+        single-classe docente has no alternative).
+
+        Relaxable like _constraint_teacher_availability: each
+        (docente, classe, giorno) gets an override bool at an extreme
+        weight, so the solver only exceeds the cap when there is truly no
+        other way to fill the week, and every such case is surfaced by
+        get_conflicts() with the "authorize_single_classe_day" deroga
+        (scoped to that docente) - never silent. Paired lessons count once
+        (see _paired_assignment_ids_to_dedupe).
+        """
+        RELAX_WEIGHT = 1000
+        MAX_HOURS_PER_CLASSE_DAY = 4
+
+        skip_ids = self._paired_assignment_ids_to_dedupe()
+
+        asgs_by_docente: Dict[str, List[AssegnazioneDati]] = {}
+        for asg in self.context.assegnazioni:
+            asgs_by_docente.setdefault(asg.docente_id, []).append(asg)
+
+        for docente_id, asgs in asgs_by_docente.items():
+            classi_ids = {a.classe_id for a in asgs}
+            if len(classi_ids) < 2:
+                continue
+            if self._deroga_active("authorize_single_classe_day", docente_id=docente_id):
+                continue
+
+            for classe_id in classi_ids:
+                classe_asgs = [a for a in asgs if a.classe_id == classe_id and a.assegnazione_id not in skip_ids]
+                if not classe_asgs:
+                    continue
+                for giorno in range(5):
+                    hours = [
+                        self.x[(a.assegnazione_id, giorno, ora)]
+                        for a in classe_asgs
+                        for ora in range(6)
+                        if (a.assegnazione_id, giorno, ora) in self.x
+                    ]
+                    if len(hours) <= MAX_HOURS_PER_CLASSE_DAY:
+                        continue
+
+                    relax = self.model.NewBoolVar(f"classe_day_cap_override_{docente_id}_{classe_id}_{giorno}")
+                    self.model.Add(sum(hours) <= MAX_HOURS_PER_CLASSE_DAY).OnlyEnforceIf(relax.Not())
+
+                    self.soft_penalties.append(SoftPenalty(
+                        var=relax, weight=RELAX_WEIGHT, kind="classe_day_cap_override",
+                        description=(
+                            f"{asgs[0].docente_nome} ha più di {MAX_HOURS_PER_CLASSE_DAY} ore "
+                            f"con la stessa classe ({classe_asgs[0].classe_nome}, "
+                            f"{GIORNI_NOMI_IT[GiornoEnum(giorno).name]}): nessun'altra "
+                            "combinazione riempiva tutte le ore delle classi"
+                        ),
+                        docente_id=docente_id, classe_id=classe_id, giorno=giorno,
+                        suggested_action={
+                            "action_type": "authorize_single_classe_day",
+                            "label": "Autorizza giornata mono-classe",
+                        },
+                    ))
 
     def _constraint_exclude_stage(self) -> None:
         """Hard constraint 5: Exclude classes in stage from scheduling."""
