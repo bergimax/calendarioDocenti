@@ -92,6 +92,31 @@ class ScheduleRepository:
                 giorni_fasce=disp.giorni_fasce,
             )
 
+        # Same fallback the Disponibilita page applies for a docente with no
+        # record this week (AvailabilityService.get_or_create_availability):
+        # inherit their most recent earlier week, else the default 8-14 grid.
+        # Read-only - nothing is persisted, and recorded weeks are never touched.
+        for docente_id in docenti_set:
+            if docente_id in disponibilita_map:
+                continue
+            previous = self.db.query(DisponibilitaSettimanale).filter(
+                and_(
+                    DisponibilitaSettimanale.scuola_id == scuola_id,
+                    DisponibilitaSettimanale.docente_id == docente_id,
+                    DisponibilitaSettimanale.settimana_inizio < week_start,
+                )
+            ).order_by(DisponibilitaSettimanale.settimana_inizio.desc()).first()
+            giorni_fasce = previous.giorni_fasce if previous else {
+                giorno: [
+                    {"ora_inizio": f"{h:02d}:00", "ora_fine": f"{h + 1:02d}:00", "disponibile": True}
+                    for h in range(8, 14)
+                ]
+                for giorno in ("lunedi", "martedi", "mercoledi", "giovedi", "venerdi")
+            }
+            disponibilita_map[docente_id] = DisponibilitaDati(
+                docente_id=docente_id, giorni_fasce=giorni_fasce,
+            )
+
         # 3. Get calendar for week
         calendario_list = self.db.query(CalendarioAnnuale).filter(
             and_(
