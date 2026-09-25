@@ -127,6 +127,10 @@ class SoftPenalty:
     # out (after solving) whether this docente is over or under target -
     # only "over" for a CONTRATTO docente gets a suggested_action.
     hour_vars: Optional[List[Any]] = None
+    # ore_target_deviation only: how the target was derived (residual hours,
+    # weeks left, deroga), appended to the description once the actual
+    # assigned hours are known.
+    target_detail: Optional[str] = None
     ore_target: Optional[int] = None
     docente_tipo: Optional[str] = None
 
@@ -1020,6 +1024,13 @@ class ScheduleSolver:
             ):
                 ore_target = max(1, ore_target // 2)
 
+            target_detail = (
+                f"monte ore residuo {asg.ore_residue}h su {weeks_in_year} "
+                f"settiman{'a' if weeks_in_year == 1 else 'e'} rimanenti"
+            )
+            if ore_target != max(1, asg.ore_residue // weeks_in_year):
+                target_detail += ", dimezzato dalla deroga sulle ore a contratto"
+
             # Sum hours assigned this week
             slots_for_asg = [
                 self.x[(asg.assegnazione_id, giorno, ora)]
@@ -1044,6 +1055,7 @@ class ScheduleSolver:
                     ),
                     classe_id=asg.classe_id, docente_id=asg.docente_id,
                     hour_vars=slots_for_asg, ore_target=ore_target,
+                    target_detail=target_detail,
                     docente_tipo=self.context.docenti_map.get(asg.docente_id),
                 ))
 
@@ -1354,11 +1366,19 @@ class ScheduleSolver:
                 continue
 
             suggested_action = p.suggested_action
+            description = p.description
             if p.kind == "ore_target_deviation":
                 # Only suggest "reduce hours" when they're actually OVER
                 # target (and only makes sense for a CONTRATTO docente);
                 # under target has no quick-action fix.
                 ore_assigned = sum(self.solver.Value(v) for v in (p.hour_vars or []))
+                if p.ore_target is not None:
+                    delta = ore_assigned - p.ore_target
+                    description = (
+                        f"{p.description.split(' lontane dal target')[0]}: "
+                        f"{ore_assigned}h assegnate contro un target di {p.ore_target}h "
+                        f"({'+' if delta > 0 else ''}{delta}h; {p.target_detail})"
+                    )
                 if p.docente_tipo == "CONTRATTO" and p.ore_target is not None and ore_assigned > p.ore_target:
                     suggested_action = {
                         "action_type": "reduce_contract_hours", "label": "Riduci ore docente a contratto",
@@ -1373,7 +1393,7 @@ class ScheduleSolver:
 
             conflicts.append({
                 "conflict_id": f"{p.kind}_{p.classe_id or ''}_{p.docente_id or ''}_{p.giorno}_{i}",
-                "description": p.description,
+                "description": description,
                 "suggested_action": suggested_action,
                 # Scope so the frontend can highlight the offending cell(s) in
                 # the grid (SlotLezioneResponse.conflitto), not just list the
