@@ -133,6 +133,8 @@ class SoftPenalty:
     target_detail: Optional[str] = None
     ore_target: Optional[int] = None
     docente_tipo: Optional[str] = None
+    # forced mode: the hour (8-13) a violation is about, when it is about one hour
+    ora: Optional[int] = None
 
 
 class ScheduleSolver:
@@ -149,6 +151,8 @@ class ScheduleSolver:
         max_hours_per_docente: Optional[Dict[str, int]] = None,
         max_consecutive_teoria: Optional[int] = None,
         best_effort: bool = False,
+        allow_gaps: bool = False,
+        forced: bool = False,
     ):
         """
         Initialize solver with problem context.
@@ -172,6 +176,19 @@ class ScheduleSolver:
         """
         self.context = context
         self.best_effort = best_effort
+        # Only for evaluating an already-decided schedule (solve_fixed): an
+        # admin may have freed an hour in the middle of a day, which the
+        # "no gaps" rule would otherwise reject. Never set when generating.
+        self.allow_gaps = allow_gaps
+        # Evaluating a schedule the admin forced by hand (assign/modify): the
+        # rules a manual choice can break (day capacity, a docente in two
+        # classi, hours over the monte ore, early start, stage days) become
+        # reported conflicts instead of making the schedule "infeasible".
+        # Implies best_effort and allow_gaps. Never used to generate.
+        self.forced = forced
+        if forced:
+            self.best_effort = True
+            self.allow_gaps = True
         self.deroga = deroga
         self.exclude_docente_giorno = exclude_docente_giorno or set()
         self.max_hours_per_docente = max_hours_per_docente or {}
@@ -347,7 +364,18 @@ class ScheduleSolver:
                         if asg.assegnazione_id not in skip_ids
                         and (asg.assegnazione_id, giorno, ora) in self.x
                     ]
-                    if overlapping:
+                    if not overlapping:
+                        continue
+                    if self.forced and len(overlapping) > 1:
+                        over = self.model.NewIntVar(0, len(overlapping) - 1, f"dbl_{docente_id}_{giorno}_{ora}")
+                        self.model.Add(sum(overlapping) <= 1 + over)
+                        nome = asgs[0].docente_nome
+                        self.soft_penalties.append(SoftPenalty(
+                            var=over, weight=2000, kind="docente_double_booking",
+                            description=f"{nome} è assegnato a più classi contemporaneamente",
+                            docente_id=docente_id, giorno=giorno, ora=8 + ora,
+                        ))
+                    else:
                         self.model.Add(sum(overlapping) <= 1)
 
     def _constraint_classe_no_overlap(self) -> None:
@@ -459,7 +487,14 @@ class ScheduleSolver:
                     for ora in range(min(ora_min - 8, 6)):
                         key = (asg.assegnazione_id, giorno, ora)
                         if key in self.x:
-                            self.model.Add(self.x[key] == 0)
+                            if self.forced:
+                                self.soft_penalties.append(SoftPenalty(
+                                    var=self.x[key], weight=1000, kind="classe_early_start",
+                                    description=f"{asg.classe_nome}: lezione prima dell'ingresso ({ora_min}:00)",
+                                    classe_id=classe_id, giorno=giorno, ora=8 + ora,
+                                ))
+                            else:
+                                self.model.Add(self.x[key] == 0)
 
     def _constraint_friday_start_at_8(self) -> None:
         """
@@ -553,6 +588,27 @@ class ScheduleSolver:
 
                 if not hours_in_day:
                     continue
+                if self.forced:
+                    # both directions are reported: hours missing from the
+                    # day and hours beyond what the calendar allows
+                    total = sum(hours_in_day)
+                    shortfall = self.model.NewIntVar(0, max(ore_max, 0), f"unfilled_{classe_id}_{giorno}")
+                    over = self.model.NewIntVar(0, 6, f"overcap_{classe_id}_{giorno}")
+                    self.model.Add(total + shortfall - over == ore_max)
+                    if ore_max > 0:
+                        self.soft_penalties.append(SoftPenalty(
+                            var=shortfall, weight=1500, kind="classe_unfilled",
+                            description=f"{asgs[0].classe_nome}: ore senza lezione",
+                            classe_id=classe_id, giorno=giorno,
+                            hour_vars=hours_in_day, ore_target=ore_max,
+                        ))
+                    self.soft_penalties.append(SoftPenalty(
+                        var=over, weight=1500, kind="classe_over_capacity",
+                        description=f"{asgs[0].classe_nome}: lezioni oltre l'orario previsto",
+                        classe_id=classe_id, giorno=giorno,
+                        hour_vars=hours_in_day, ore_target=ore_max,
+                    ))
+                    continue
                 if not self.best_effort or ore_max == 0:
                     self.model.Add(sum(hours_in_day) == ore_max)
                     continue
@@ -625,7 +681,7 @@ class ScheduleSolver:
                     starts_by_ora.append((i, start))
                     prev = occ
 
-                if starts:
+                if starts and not self.allow_gaps:
                     self.model.Add(sum(starts) <= 1)
                 self._classe_day_starts[(classe_id, giorno)] = starts_by_ora
 
@@ -804,6 +860,8 @@ class ScheduleSolver:
 
     def _constraint_exclude_stage(self) -> None:
         """Hard constraint 5: Exclude classes in stage from scheduling."""
+        if self.forced:
+            return  # a forced lesson on a stage day is reported by _constraint_day_capacity
         for giorno_data in self.context.calendario:
             giorno = giorno_data.giorno
 
@@ -831,6 +889,27 @@ class ScheduleSolver:
 
     def _constraint_monte_ore_limit(self) -> None:
         """Hard constraint 6: Don't exceed residual hours for assegnazione."""
+        if self.forced:
+            for asg in self.context.assegnazioni:
+                mine = [
+                    self.x[(asg.assegnazione_id, giorno, ora)]
+                    for giorno in range(5) for ora in range(6)
+                    if (asg.assegnazione_id, giorno, ora) in self.x
+                ]
+                if not mine:
+                    continue
+                cap = max(asg.ore_residue, 0)
+                over = self.model.NewIntVar(0, len(mine), f"monte_over_{asg.assegnazione_id}")
+                self.model.Add(sum(mine) <= cap + over)
+                self.soft_penalties.append(SoftPenalty(
+                    var=over, weight=1500, kind="monte_ore_exceeded",
+                    description=(
+                        f"{asg.docente_nome} ha superato il monte ore residuo in {asg.classe_nome} "
+                        f"({cap}h disponibili)"
+                    ),
+                    classe_id=asg.classe_id, docente_id=asg.docente_id,
+                ))
+            return
         for asg in self.context.assegnazioni:
             if asg.ore_residue <= 0:
                 # No hours left -> can't assign
@@ -933,7 +1012,9 @@ class ScheduleSolver:
 
             late_starts = [start for ora, start in starts_by_ora if ora != 0]
             late_start = self.model.NewBoolVar(f"late_start_{classe_id}_{giorno}")
-            self.model.Add(late_start == sum(late_starts))
+            # max, not sum: with an hour freed mid-day (allow_gaps) a classe can
+            # have several blocks, and a bool can't equal a sum of 2
+            self.model.AddMaxEquality(late_start, late_starts)
             self.soft_penalties.append(SoftPenalty(
                 var=late_start, weight=weight, kind="classe_late_start",
                 description=(
@@ -1496,13 +1577,30 @@ class ScheduleSolver:
                 )
                 suggested_action = None
 
-            dedup_key = (p.kind, p.classe_id, p.docente_id, p.giorno)
+            ore_slot: Optional[List[int]] = None
+            if p.kind == "classe_over_capacity":
+                ore_slot = self._over_capacity_hours(p)
+                description = (
+                    f"{p.description} - {GIORNI_NOMI_IT[GiornoEnum(p.giorno).name]}: "
+                    f"{len(ore_slot)} ora/e fuori dall'orario ({', '.join(f'{h}:00' for h in ore_slot)}), "
+                    "assegnata/e a mano"
+                )
+            elif p.ora is not None:
+                ore_slot = [p.ora]
+                description = f"{p.description} ({GIORNI_NOMI_IT[GiornoEnum(p.giorno).name]} {p.ora}:00)"
+
+            dedup_key = (p.kind, p.classe_id, p.docente_id, p.giorno, p.ora)
             if dedup_key in seen:
                 continue
             seen.add(dedup_key)
 
+            giorno_nome = GiornoEnum(p.giorno).name if p.giorno is not None else None
             conflicts.append({
                 "conflict_id": f"{p.kind}_{p.classe_id or ''}_{p.docente_id or ''}_{p.giorno}_{i}",
+                # Stable across recomputations (conflict_id embeds the list
+                # position): what an admin's approve/reject is stored against.
+                "chiave": f"{p.kind}|{p.classe_id or ''}|{p.docente_id or ''}|{giorno_nome or ''}"
+                          + (f"|{p.ora}" if p.ora is not None else ""),
                 "description": description,
                 "suggested_action": suggested_action,
                 # Scope so the frontend can highlight the offending cell(s) in
@@ -1514,9 +1612,37 @@ class ScheduleSolver:
                 # Only for "classe_unfilled": the hours (8-13) left without a
                 # lesson, so the grid can paint those empty cells red.
                 **({"ore": ore_vuote} if ore_vuote is not None else {}),
+                # Only for hour-specific conflicts of a forced lesson: the hours
+                # (8-13) whose lessons are the problem, so only those cells go red.
+                **({"ore_slot": ore_slot} if ore_slot is not None else {}),
             })
 
         return conflicts
+
+    def _over_capacity_hours(self, p: SoftPenalty) -> List[int]:
+        """
+        Which hours (8-13) of a "classe_over_capacity" classe/giorno are the
+        excess: lessons outside the day's window (from its earliest allowed
+        start for ore_target hours), topped up with the latest other lessons
+        if the excess lies inside the window.
+        """
+        occupied = sorted(
+            ora for ora in range(6)
+            for asg in self.context.assegnazioni
+            if asg.classe_id == p.classe_id
+            and (v := self.x.get((asg.assegnazione_id, p.giorno, ora))) is not None
+            and self.solver.Value(v) == 1
+        )
+        excess = len(occupied) - (p.ore_target or 0)
+        start = max((self._ora_inizio_min_for_classe_giorno(p.classe_id, p.giorno) or 8) - 8, 0)
+        window = range(start, start + (p.ore_target or 0))
+        extra = [h for h in occupied if h not in window]
+        for h in reversed(occupied):
+            if len(extra) >= excess:
+                break
+            if h not in extra:
+                extra.append(h)
+        return [8 + h for h in sorted(extra[:max(excess, 0)] if excess < len(extra) else extra)]
 
     def _unfilled_hours(self, p: SoftPenalty) -> List[int]:
         """

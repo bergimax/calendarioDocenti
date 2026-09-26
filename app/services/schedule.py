@@ -5,6 +5,7 @@ from app.repositories.schedule import ScheduleRepository
 from app.domain.solver import ScheduleSolver
 from app.schemas import ScheduleGenerateResponse, SlotLezioneResponse
 import logging
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +106,7 @@ class ScheduleService:
                         accoppiata=s["accoppiata"],
                         classe_accoppiata_id=s.get("classe_accoppiata_id"),
                         conflitto=s.get("conflitto", False),
+                        conflitto_chiavi=s.get("conflitto_chiavi", []),
                         indisponibile=s.get("indisponibile", False),
                     )
                     for s in slots
@@ -179,7 +181,10 @@ class ScheduleService:
         if not schedule:
             return None
 
-        conflicts = self._conflicts_for_persisted_schedule(scuola_id, week_start, schedule)
+        conflicts = self._apply_handled(
+            schedule["schedule_id"],
+            self._conflicts_for_persisted_schedule(scuola_id, week_start, schedule),
+        )
         self._mark_slot_conflicts(schedule["slots"], conflicts)
         self._mark_slot_unavailability(schedule["slots"], scuola_id, week_start)
         return {"status": "found", "conflicts": conflicts, **schedule}
@@ -215,6 +220,10 @@ class ScheduleService:
 
         solver, status, _ = self._solve_with_fallback(context, fixed_keys=assigned_keys)
         if status not in ("OPTIMAL", "FEASIBLE"):
+            logger.warning(
+                f"Persisted schedule for {week_start} violates a hard constraint ({status}); "
+                "conflicts cannot be computed"
+            )
             return []
 
         return solver.get_conflicts()
@@ -224,23 +233,29 @@ class ScheduleService:
     @staticmethod
     def _mark_slot_conflicts(slots: List[Dict[str, Any]], conflicts: List[Dict[str, Any]]) -> None:
         """
-        Set each slot dict's "conflitto" key in place (frontend/src/routes/
-        orario.tsx colors the cell red on it) when the slot falls within the
-        scope - (classe_id or docente_id) + giorno - of one of `conflicts`
-        (see ScheduleSolver.get_conflicts). Without this, conflicts were only
-        ever visible in the sidebar list, never on the grid itself.
+        Set each slot dict's "conflitto" (frontend/src/routes/orario.tsx
+        colors the cell red on it) and "conflitto_chiavi" (which conflicts it
+        belongs to, so a click can show their messages) in place, when the
+        slot falls within the scope of one of `conflicts` (see
+        ScheduleSolver.get_conflicts). Without this, conflicts were only ever
+        visible in the sidebar list, never on the grid itself.
         """
+        # "classe_unfilled" conflicts ("ore" set) are about hours with no
+        # lesson: those cells are painted red on their own, the lessons the
+        # classe does have that day stay normal.
         scopes = [
-            (c.get("classe_id"), c.get("docente_id"), c.get("giorno"))
+            (c.get("chiave"), c.get("classe_id"), c.get("docente_id"), c.get("giorno"), c.get("ore_slot"))
             for c in conflicts
-            if (c.get("classe_id") or c.get("docente_id"))
-            # "classe_unfilled" conflicts ("ore" set) are about hours with no
-            # lesson: those cells are painted red on their own, the lessons
-            # the classe does have that day stay normal.
-            and not c.get("ore")
+            if (c.get("classe_id") or c.get("docente_id")) and not c.get("ore")
         ]
 
-        def in_scope(s: Dict[str, Any], classe_id, docente_id, giorno) -> bool:
+        def in_scope(s: Dict[str, Any], classe_id, docente_id, giorno, ore_slot=None) -> bool:
+            if ore_slot:
+                # a forced lesson's conflict: only the lessons at those hours
+                return s.get("giorno") == giorno and s.get("ora_inizio") in ore_slot and (
+                    (classe_id and s.get("classe_id") == classe_id)
+                    or (docente_id and s.get("docente_id") == docente_id)
+                )
             if giorno:
                 # a day-scoped conflict: any lesson of that classe or docente that day
                 return s.get("giorno") == giorno and (
@@ -256,7 +271,363 @@ class ScheduleService:
             )
 
         for s in slots:
-            s["conflitto"] = any(in_scope(s, *scope) for scope in scopes)
+            chiavi = [chiave for chiave, *scope in scopes if chiave and in_scope(s, *scope)]
+            s["conflitto_chiavi"] = chiavi
+            s["conflitto"] = bool(chiavi)
+
+    def _apply_handled(self, orario_id: str, conflicts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Drop the conflicts the admin already handled (ConflittoGestito):
+        approved ones entirely, and, for uncovered hours, the hours they chose
+        to leave free (a conflict left with no hour goes away too).
+        """
+        from app.models import ConflittoGestito
+
+        rows = self.db.query(ConflittoGestito).filter(
+            ConflittoGestito.orario_settimanale_id == orario_id
+        ).all()
+        if not rows:
+            return conflicts
+        approved = {r.chiave for r in rows if r.azione == "APPROVATO"}
+        freed = {r.chiave for r in rows if r.azione == "LIBERA"}
+
+        result = []
+        for c in conflicts:
+            if c.get("chiave") in approved:
+                continue
+            if c.get("ore"):
+                ore = [h for h in c["ore"] if f"libera|{c['classe_id']}|{c['giorno']}|{h}" not in freed]
+                if not ore:
+                    continue
+                if len(ore) != len(c["ore"]):
+                    c = {
+                        **c, "ore": ore,
+                        "description": re.sub(r"\d+ ora/e non coperta/e \([^)]*\)",
+                                              f"{len(ore)} ora/e non coperta/e ({', '.join(f'{h}:00' for h in ore)})",
+                                              c["description"]),
+                    }
+            result.append(c)
+        return result
+
+    def assignable_for_classe(self, scuola_id: str, week_start: date, classe_id: str) -> List[Dict[str, Any]]:
+        """The docente/materia pairs assigned to a classe (what can be put in one of its free hours)."""
+        context = self.repo.get_week_context(scuola_id, week_start)
+        return sorted(
+            (
+                {
+                    "docente_id": a.docente_id, "docente_nome": a.docente_nome,
+                    "materia_id": a.materia_id, "materia_nome": a.materia_nome,
+                    "ore_residue": a.ore_residue,
+                }
+                for a in context.assegnazioni if a.classe_id == classe_id
+            ),
+            key=lambda r: (r["docente_nome"] or "", r["materia_nome"] or ""),
+        )
+
+    def _day_max_violation(self, context, classe_id: str, giorno: str, count_after: int) -> Optional[str]:
+        """
+        Why a classe can't have `count_after` lessons on `giorno`, or None.
+        The calendar's daily maximum is a rule a manual choice can't break
+        (a later ingresso is fine, more hours than the day allows is not).
+        """
+        from app.domain.solver import ScheduleSolver, GiornoEnum, GIORNI_NOMI_IT
+
+        ore_max = ScheduleSolver(context)._ore_max_for_classe_giorno(classe_id, GiornoEnum[giorno].value)
+        if count_after <= ore_max:
+            return None
+        nome = next((a.classe_nome for a in context.assegnazioni if a.classe_id == classe_id), classe_id)
+        giorno_it = GIORNI_NOMI_IT.get(giorno, giorno)
+        if ore_max == 0:
+            return f"{nome} non ha lezione {giorno_it}: è un giorno di chiusura o di stage."
+        return (
+            f"{nome}, {giorno_it}: la giornata prevede al massimo {ore_max} ore e con questa lezione "
+            f"sarebbero {count_after}. Per assegnare quest'ora libera prima un'altra ora della stessa "
+            "giornata (un ingresso posticipato è consentito, superare il massimo di ore no)."
+        )
+
+    def assign_slot(
+        self, scuola_id: str, week_start: date, classe_id: str, giorno: str, ora_inizio: int,
+        docente_id: str, materia_id: str,
+    ) -> Dict[str, Any]:
+        """
+        Manual assignment ("forzatura") of a lesson to a free hour. The
+        result is checked like a manual edit (solve_fixed with the
+        best-effort fallback): rules the solver can relax (availability,
+        target hours, Friday start, ...) don't block it, they come back as
+        conflicts, and so do the ones a manual choice may break (an hour
+        outside the day's calendar, a docente in two classi, hours over the
+        monte ore): the admin decides with approve/reject. What is refused,
+        with the reason: more lessons than the classe's daily maximum (a
+        later ingresso is allowed, more hours are not).
+
+        A docente in a paired (accoppiata) lesson teaches every classe of the
+        group at once, so the lesson is assigned to all of them; a different
+        lesson already sitting in that hour of a partner classe is replaced
+        (reported in the response's "message").
+        """
+        from app.models import OrarioSettimanale, SlotLezione, ConflittoGestito, AuditLog
+        from app.domain.solver import GiornoEnum
+
+        orario = self.db.query(OrarioSettimanale).filter(
+            OrarioSettimanale.scuola_id == scuola_id,
+            OrarioSettimanale.settimana_inizio == week_start,
+        ).first()
+        if not orario:
+            return {"status": "error", "message": "No schedule found for this week"}
+        if orario.stato == "APPROVATO":
+            return {"status": "error", "message": "Schedule is approved and locked from modifications"}
+        if giorno not in GiornoEnum.__members__:
+            return {"status": "error", "message": f"Invalid giorno: {giorno!r}"}
+        if not (8 <= ora_inizio <= 13):
+            return {"status": "error", "message": f"Invalid ora_inizio: {ora_inizio} (must be 8-13)"}
+
+        context = self.repo.get_week_context(scuola_id, week_start)
+        asg_of = {
+            (a.classe_id, a.docente_id, a.materia_id): a for a in context.assegnazioni
+        }
+        classe_nomi = {a.classe_id: a.classe_nome for a in context.assegnazioni}
+        target_asg = asg_of.get((classe_id, docente_id, materia_id))
+        if not target_asg:
+            return {"status": "error", "message": "Il docente non ha questa materia assegnata per la classe."}
+
+        # The joint-lesson group: classi paired for this docente + materia.
+        group = {classe_id}
+        grew = True
+        while grew:
+            grew = False
+            for c_a, c_b, mat, doc in context.classi_accoppiate:
+                if doc == docente_id and mat == materia_id and (c_a in group) != (c_b in group):
+                    group.update((c_a, c_b))
+                    grew = True
+
+        slots = list(orario.slot_lezioni)
+        at_hour = [s for s in slots if s.giorno == giorno and s.ora_inizio == ora_inizio]
+        if any(s.classe_id == classe_id for s in at_hour):
+            return {"status": "error", "message": "Quest'ora ha già una lezione: modificala dal pannello."}
+
+        to_remove: List[Any] = []
+        replaced: List[str] = []
+        to_add: List[str] = []  # classe ids that get the new lesson
+        for c in sorted(group):
+            if (c, docente_id, materia_id) not in asg_of:
+                return {
+                    "status": "error",
+                    "message": f"La classe {classe_nomi.get(c, c)} (accoppiata) non ha questa materia "
+                               "assegnata a questo docente.",
+                }
+            existing = next((s for s in at_hour if s.classe_id == c), None)
+            if existing is None:
+                to_add.append(c)
+            elif existing.docente_id == docente_id and existing.materia_id == materia_id:
+                continue  # that classe already has this very lesson
+            else:
+                # replace the partner classe's lesson: all of that docente's
+                # lessons at this hour go, they may be a joint lesson too
+                for j in at_hour:
+                    if j.docente_id == existing.docente_id and j not in to_remove:
+                        to_remove.append(j)
+                        replaced.append(f"{classe_nomi.get(j.classe_id, j.classe_id)} "
+                                        f"({j.docente.nome if j.docente else j.docente_id})")
+                to_add.append(c)
+
+        # The day's maximum hours cannot be forced: explain why instead.
+        for c in to_add:
+            after = sum(
+                1 for s in slots
+                if s.classe_id == c and s.giorno == giorno and s not in to_remove
+            ) + 1
+            reason = self._day_max_violation(context, c, giorno, after)
+            if reason:
+                return {"status": "error", "message": reason}
+
+        assigned_keys = set()
+        for s in slots:
+            if s in to_remove:
+                continue
+            asg = asg_of.get((s.classe_id, s.docente_id, s.materia_id))
+            if asg:
+                assigned_keys.add((asg.assegnazione_id, GiornoEnum[s.giorno].value, s.ora_inizio - 8))
+        for c in to_add:
+            assigned_keys.add((asg_of[(c, docente_id, materia_id)].assegnazione_id,
+                               GiornoEnum[giorno].value, ora_inizio - 8))
+
+        solver, status, _ = self._solve_with_fallback(context, fixed_keys=assigned_keys)
+        if status not in ("OPTIMAL", "FEASIBLE"):
+            return {
+                "status": "error",
+                "message": "Assegnazione non possibile: viola una regola non derogabile del modello.",
+            }
+
+        quality_score, quality_level, n_conflicts = solver.calculate_quality_score()
+        try:
+            for j in to_remove:
+                self.db.delete(j)
+            paired = len(group) > 1
+            for c in to_add:
+                partner = next((g for g in sorted(group) if g != c), None) if paired else None
+                self.db.add(SlotLezione(
+                    orario_settimanale_id=orario.id, classe_id=c, docente_id=docente_id,
+                    materia_id=materia_id, giorno=giorno, ora_inizio=ora_inizio, ora_fine=ora_inizio + 1,
+                    accoppiata=paired, classe_accoppiata_id=partner,
+                ))
+            # these hours are no longer ones the admin chose to leave free
+            self.db.query(ConflittoGestito).filter(
+                ConflittoGestito.orario_settimanale_id == orario.id,
+                ConflittoGestito.chiave.in_([f"libera|{c}|{giorno}|{ora_inizio}" for c in group]),
+            ).delete(synchronize_session=False)
+            orario.quality_score = quality_score
+            orario.quality_level = quality_level
+            orario.n_conflitti_soft = n_conflicts
+            self.db.add(AuditLog(
+                scuola_id=scuola_id, orario_settimanale_id=orario.id, azione="ASSIGN_SLOT",
+                dettagli={"classe_id": classe_id, "giorno": giorno, "ora_inizio": ora_inizio,
+                          "docente_id": docente_id, "materia_id": materia_id,
+                          "classi": to_add, "sostituite": replaced},
+            ))
+            self.db.commit()
+        except Exception as e:
+            self.db.rollback()
+            logger.error(f"Error assigning slot: {e}")
+            return {"status": "error", "message": str(e)}
+
+        result = self.get_schedule(scuola_id, week_start)
+        notes = []
+        if len(to_add) > 1:
+            notes.append("Assegnata anche alle classi accoppiate: " + ", ".join(
+                classe_nomi.get(c, c) for c in to_add if c != classe_id))
+        if replaced:
+            notes.append("Sostituite le lezioni di: " + "; ".join(replaced))
+        result["message"] = ". ".join(notes) or None
+        return result
+
+    def approve_conflicts(self, scuola_id: str, week_start: date, chiavi: List[str]) -> Dict[str, Any]:
+        """Approve conflicts: they disappear and their cells go back to normal."""
+        return self._handle_conflict(scuola_id, week_start, approve=chiavi)
+
+    def reject_conflict(
+        self, scuola_id: str, week_start: date, classe_id: str, giorno: str, ora_inizio: int,
+    ) -> Dict[str, Any]:
+        """Reject: the lesson at that classe/giorno/ora (if any) is removed and the hour left free."""
+        return self._handle_conflict(scuola_id, week_start, reject=(classe_id, giorno, ora_inizio))
+
+    def _expand_to_paired_classes(self, scuola_id: str, week_start: date, chiavi: List[str]) -> List[str]:
+        """
+        A docente teaching a paired (accoppiata) lesson has one conflict per
+        classe of the group, all about the same hours. Approving one should
+        settle them all, so add the same conflict (kind, docente, giorno) for
+        every classe paired with the approved one for that docente.
+        """
+        context = self.repo.get_week_context(scuola_id, week_start)
+        expanded = list(chiavi)
+        current = None  # current conflicts, fetched only if a classe-only conflict needs them
+        for chiave in chiavi:
+            parts = chiave.split("|")
+            if len(parts) == 4 and parts[1] and not parts[2] and parts[3]:
+                # a classe-level conflict without a docente (e.g. a forced hour
+                # outside the day): settle the same conflict, on the same
+                # hours, of the classi it is paired with.
+                if current is None:
+                    current = (self.get_schedule(scuola_id, week_start) or {}).get("conflicts", [])
+                mine = next((c for c in current if c["chiave"] == chiave), None)
+                if not mine or not mine.get("ore_slot"):
+                    continue
+                group = {parts[1]}
+                grew = True
+                while grew:
+                    grew = False
+                    for c_a, c_b, _mat, _doc in context.classi_accoppiate:
+                        if (c_a in group) != (c_b in group):
+                            group.update((c_a, c_b))
+                            grew = True
+                for c in current:
+                    ck = c["chiave"].split("|")
+                    if (c["chiave"] not in expanded and ck[0] == parts[0] and ck[1] in group
+                            and ck[3] == parts[3] and c.get("ore_slot") == mine["ore_slot"]):
+                        expanded.append(c["chiave"])
+                continue
+            if len(parts) != 4 or not parts[1] or not parts[2]:
+                continue
+            kind, classe_id, docente_id, giorno = parts
+            group = {classe_id}
+            grew = True
+            while grew:
+                grew = False
+                for c_a, c_b, _mat, doc in context.classi_accoppiate:
+                    if doc == docente_id and (c_a in group) != (c_b in group):
+                        group.update((c_a, c_b))
+                        grew = True
+            for c in group - {classe_id}:
+                other = f"{kind}|{c}|{docente_id}|{giorno}"
+                if other not in expanded:
+                    expanded.append(other)
+        return expanded
+
+    def _handle_conflict(
+        self, scuola_id: str, week_start: date, approve: Optional[List[str]] = None,
+        reject: Optional[tuple] = None,
+    ) -> Dict[str, Any]:
+        from app.models import OrarioSettimanale, SlotLezione, ConflittoGestito, AuditLog
+
+        orario = self.db.query(OrarioSettimanale).filter(
+            OrarioSettimanale.scuola_id == scuola_id,
+            OrarioSettimanale.settimana_inizio == week_start,
+        ).first()
+        if not orario:
+            return {"status": "error", "message": "No schedule found for this week"}
+        if orario.stato == "APPROVATO":
+            return {"status": "error", "message": "Schedule is approved and locked from modifications"}
+
+        try:
+            if approve:
+                approve = self._expand_to_paired_classes(scuola_id, week_start, approve)
+                for chiave in approve:
+                    self.db.add(ConflittoGestito(
+                        orario_settimanale_id=orario.id, chiave=chiave, azione="APPROVATO",
+                    ))
+                dettagli = {"chiavi": approve}
+                azione = "APPROVE_CONFLICT"
+            else:
+                classe_id, giorno, ora = reject
+                slot = self.db.query(SlotLezione).filter(
+                    SlotLezione.orario_settimanale_id == orario.id,
+                    SlotLezione.classe_id == classe_id,
+                    SlotLezione.giorno == giorno,
+                    SlotLezione.ora_inizio == ora,
+                ).first()
+                classi = {classe_id}
+                if slot:
+                    # A docente can only be in one place at a time, except in
+                    # a joint (paired) lesson, which can span 2+ classi (a
+                    # 4-way group is several ClasseAccoppiata pairs). So every
+                    # lesson of this docente at this giorno/ora is the same
+                    # joint lesson: free all of them, or the paired-class rule
+                    # would break and the schedule could no longer be checked.
+                    joint = self.db.query(SlotLezione).filter(
+                        SlotLezione.orario_settimanale_id == orario.id,
+                        SlotLezione.giorno == giorno,
+                        SlotLezione.ora_inizio == ora,
+                        SlotLezione.docente_id == slot.docente_id,
+                    ).all()
+                    classi.update(j.classe_id for j in joint)
+                    for j in joint:
+                        self.db.delete(j)
+                for c in classi:
+                    self.db.add(ConflittoGestito(
+                        orario_settimanale_id=orario.id, chiave=f"libera|{c}|{giorno}|{ora}", azione="LIBERA",
+                    ))
+                dettagli = {"classe_id": classe_id, "giorno": giorno, "ora_inizio": ora}
+                azione = "REJECT_CONFLICT"
+
+            self.db.add(AuditLog(
+                scuola_id=scuola_id, orario_settimanale_id=orario.id, azione=azione, dettagli=dettagli,
+            ))
+            self.db.commit()
+        except Exception as e:
+            self.db.rollback()
+            logger.error(f"Error handling conflict: {e}")
+            return {"status": "error", "message": str(e)}
+
+        return self.get_schedule(scuola_id, week_start)
 
     def _mark_slot_unavailability(
         self, slots: List[Dict[str, Any]], scuola_id: str, week_start: date,
@@ -306,8 +677,15 @@ class ScheduleService:
         """
         from app.domain.solver import ScheduleSolver
 
-        def run(best_effort: bool):
-            solver = ScheduleSolver(context, best_effort=best_effort, **solver_kwargs)
+        def run(best_effort: bool, forced: bool = False):
+            solver = ScheduleSolver(
+                context, best_effort=best_effort,
+                # evaluating a decided schedule: an hour the admin freed in
+                # the middle of a day is not a reason to reject it
+                allow_gaps=best_effort and fixed_keys is not None,
+                forced=forced,
+                **solver_kwargs,
+            )
             solver.build_model()
             if fixed_keys is not None:
                 return solver, solver.solve_fixed(fixed_keys)
@@ -319,6 +697,10 @@ class ScheduleService:
 
         logger.warning("Strict model INFEASIBLE, retrying in best-effort mode")
         solver, status = run(True)
+        if status == "INFEASIBLE" and fixed_keys is not None:
+            # a schedule with lessons forced by hand: report what they break
+            logger.warning("Best-effort INFEASIBLE for a fixed schedule, evaluating in forced mode")
+            solver, status = run(True, forced=True)
         return solver, status, status in ("OPTIMAL", "FEASIBLE")
 
     def _identify_conflicts(self, context) -> list:
@@ -464,7 +846,7 @@ class ScheduleService:
         re-solving the same CP-SAT model with every variable pinned to the
         resulting full-week assignment (see ScheduleSolver.solve_fixed).
         """
-        from app.models import OrarioSettimanale, SlotLezione, AuditLog
+        from app.models import OrarioSettimanale, SlotLezione, AuditLog, ConflittoGestito
         from app.domain.solver import ScheduleSolver, GiornoEnum
 
         orario = self.db.query(OrarioSettimanale).filter(
@@ -496,6 +878,15 @@ class ScheduleService:
             return {"status": "error", "message": f"Invalid ora_inizio: {new_ora_inizio} (must be 8-13)"}
 
         context = self.repo.get_week_context(scuola_id, week_start)
+
+        if new_giorno != slot.giorno:
+            after = sum(
+                1 for s in orario.slot_lezioni
+                if s.classe_id == slot.classe_id and s.giorno == new_giorno
+            ) + 1
+            reason = self._day_max_violation(context, slot.classe_id, new_giorno, after)
+            if reason:
+                return {"status": "error", "message": reason}
 
         # Decision variables are keyed by assegnazione_id, so moving the
         # slot to a different docente is only possible if that docente is
@@ -558,7 +949,7 @@ class ScheduleService:
         self.db.commit()
 
         updated = self.repo.get_schedule_by_week(scuola_id, week_start)
-        conflicts = solver.get_conflicts()
+        conflicts = self._apply_handled(orario.id, solver.get_conflicts())
         self._mark_slot_conflicts(updated["slots"], conflicts)
         self._mark_slot_unavailability(updated["slots"], scuola_id, week_start)
         return {"status": "modified", "conflicts": conflicts, **updated}
@@ -715,6 +1106,10 @@ class ScheduleService:
         try:
             self.db.query(SlotLezione).filter(
                 SlotLezione.orario_settimanale_id == orario.id
+            ).delete(synchronize_session=False)
+            # a new solution: earlier approve/reject decisions no longer apply
+            self.db.query(ConflittoGestito).filter(
+                ConflittoGestito.orario_settimanale_id == orario.id
             ).delete(synchronize_session=False)
 
             for slot in slots:

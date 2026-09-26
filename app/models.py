@@ -273,6 +273,26 @@ class PreferenzeAIMemory(Base):
     created_at = Column(DateTime, server_default=func.now())
 
 
+class ConflittoGestito(Base):
+    """
+    An admin decision on one conflict of a generated schedule (see
+    ScheduleService.approve_conflict / reject_conflict): "APPROVATO" hides the
+    conflict (its cells go back to normal), "LIBERA" records an hour the admin
+    chose to leave free (chiave "libera|classe_id|GIORNO|ora"), so it is not
+    reported again as an uncovered hour. Conflicts are recomputed on every
+    read, so `chiave` is a stable identifier built from the conflict's kind
+    and scope, not its list position. Cleared whenever the week is
+    regenerated.
+    """
+    __tablename__ = "conflitto_gestito"
+
+    id = Column(String, primary_key=True, default=lambda: str(__import__('uuid').uuid4()))
+    orario_settimanale_id = Column(String, ForeignKey("orario_settimanale.id"), nullable=False, index=True)
+    chiave = Column(String(300), nullable=False)
+    azione = Column(String(20), nullable=False)  # APPROVATO | LIBERA
+    created_at = Column(DateTime, server_default=func.now())
+
+
 class AuditLog(Base):
     """Audit log for all actions."""
     __tablename__ = "audit_log"

@@ -103,6 +103,13 @@ function requireSchedule(res: ScheduleMutationResult): Schedule {
   return res;
 }
 
+// The red cell the admin clicked: `chiavi` are the conflicts it belongs to,
+// the rest locates the hour (classe/giorno/ora) for "reject".
+// A free hour the admin clicked, to assign a lesson to it by hand.
+type FreeCell = { classe_id: string; classe_nome: string; giorno: string; ora: number };
+
+type ConflictSelection = { chiavi: string[]; classe_id: string; giorno: string; ora: number };
+
 function SchedulePage() {
   const [week, setWeek] = useState("");
   const [schedule, setSchedule] = useState<Schedule | null>(null);
@@ -111,6 +118,8 @@ function SchedulePage() {
   const [highlightTeacher, setHighlightTeacher] = useState<string | null>(null);
   const [selectedSlot, setSelectedSlot] = useState<SlotLezione | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [conflictSel, setConflictSel] = useState<ConflictSelection | null>(null);
+  const [selectedCell, setSelectedCell] = useState<FreeCell | null>(null);
 
   const weeks = useQuery({
     queryKey: ["weeks"],
@@ -169,6 +178,34 @@ function SchedulePage() {
     }
   }
 
+  // Approve (the conflicts of the clicked cell go away, the cell turns back
+  // to normal) or reject (that lesson is removed and its hour left free).
+  async function resolveConflict(kind: "approve" | "reject") {
+    if (!conflictSel) return;
+    try {
+      const res = await api<ScheduleMutationResult>(
+        `/api/schedule/${week}/conflicts/${kind}`,
+        {
+          method: "POST",
+          body:
+            kind === "approve"
+              ? { chiavi: conflictSel.chiavi }
+              : {
+                  classe_id: conflictSel.classe_id,
+                  giorno: conflictSel.giorno,
+                  ora_inizio: conflictSel.ora,
+                },
+        },
+      );
+      setSchedule(requireSchedule(res));
+      setConflictSel(null);
+      setSelectedSlot(null);
+      setNotice(kind === "approve" ? "Conflitto approvato." : "Ora liberata.");
+    } catch (err) {
+      setNotice(apiErrorMessage(err));
+    }
+  }
+
   async function approve() {
     try {
       const res = await api<{ status: string; message?: string }>(`/api/schedule/${week}/approve`, {
@@ -207,6 +244,8 @@ function SchedulePage() {
             onChange={(e) => {
               setWeek(e.target.value);
               setSchedule(null);
+              setConflictSel(null);
+              setSelectedCell(null);
             }}
             className="w-52 py-1.5 text-xs"
           >
@@ -237,6 +276,14 @@ function SchedulePage() {
           onSlotUpdated={(s) => {
             setSchedule(s);
             setSelectedSlot(null);
+          }}
+          selectedCell={selectedCell}
+          onCloseCell={() => setSelectedCell(null)}
+          onCellAssigned={(s, message) => {
+            setSchedule(s);
+            setSelectedCell(null);
+            setConflictSel(null);
+            setNotice(message ? `Lezione assegnata. ${message}` : "Lezione assegnata.");
           }}
         />
       }
@@ -342,7 +389,25 @@ function SchedulePage() {
             classi={classi}
             highlightTeacher={highlightTeacher}
             onHighlightTeacher={setHighlightTeacher}
-            onSelectSlot={setSelectedSlot}
+            onSelectSlot={(slot) => {
+              setSelectedSlot(slot);
+              setSelectedCell(null);
+            }}
+            conflictSel={conflictSel}
+            onSelectConflict={setConflictSel}
+            onSelectCell={(cell) => {
+              setSelectedCell(cell);
+              setSelectedSlot(null);
+            }}
+          />
+        ) : null}
+
+        {active && conflictSel ? (
+          <ConflictBand
+            conflicts={conflicts.filter((c) => c.chiave && conflictSel.chiavi.includes(c.chiave))}
+            onApprove={() => void resolveConflict("approve")}
+            onReject={() => void resolveConflict("reject")}
+            onClose={() => setConflictSel(null)}
           />
         ) : null}
 
@@ -362,18 +427,72 @@ function SchedulePage() {
   );
 }
 
+// Band under the grid for the conflict(s) of the clicked red cell.
+function ConflictBand({
+  conflicts,
+  onApprove,
+  onReject,
+  onClose,
+}: {
+  conflicts: Conflict[];
+  onApprove: () => void;
+  onReject: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <div className="glass rounded-2xl border-l-2 border-conflict p-4">
+      <div className="flex items-start gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="label-mono text-conflict">Conflitto</div>
+          <ul className="mt-1 space-y-1 text-xs">
+            {conflicts.length ? (
+              conflicts.map((c) => <li key={c.conflict_id}>{c.description}</li>)
+            ) : (
+              <li className="text-muted-foreground">Nessuna descrizione disponibile.</li>
+            )}
+          </ul>
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          <Button variant="primary" onClick={onApprove} disabled={!conflicts.length}>
+            Approva
+          </Button>
+          <Button onClick={onReject}>Rifiuta</Button>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Chiudi"
+            className="rounded-md px-2 py-1 text-muted-foreground hover:bg-accent/50"
+          >
+            ×
+          </button>
+        </div>
+      </div>
+      <p className="mt-2 text-[11px] text-muted-foreground">
+        Approva: il conflitto sparisce e le ore tornano blu. Rifiuta: la lezione viene tolta e
+        l&apos;ora resta libera.
+      </p>
+    </div>
+  );
+}
+
 function ScheduleTable({
   schedule,
   classi,
   highlightTeacher,
   onHighlightTeacher,
   onSelectSlot,
+  conflictSel,
+  onSelectConflict,
+  onSelectCell,
 }: {
   schedule: Schedule;
   classi: { id: string; nome: string }[];
   highlightTeacher: string | null;
   onHighlightTeacher: (id: string | null) => void;
   onSelectSlot: (slot: SlotLezione) => void;
+  conflictSel: ConflictSelection | null;
+  onSelectConflict: (sel: ConflictSelection | null) => void;
+  onSelectCell: (cell: FreeCell | null) => void;
 }) {
   const [giorno, setGiorno] = useState("lunedi");
 
@@ -495,23 +614,64 @@ function ScheduleTable({
                     }
                     const slot = cellSlots.get(c.id);
                     if (!slot) {
-                      if (unfilled.has(`${c.id}|${Number.parseInt(ora, 10)}`)) {
+                      const oraNum = Number.parseInt(ora, 10);
+                      if (unfilled.has(`${c.id}|${oraNum}`)) {
+                        const chiavi = (schedule.conflicts ?? [])
+                          .filter(
+                            (k) =>
+                              k.chiave &&
+                              k.classe_id === c.id &&
+                              k.giorno === giorno.toUpperCase() &&
+                              k.ore?.includes(oraNum),
+                          )
+                          .map((k) => k.chiave as string);
+                        const similar = chiavi.some((k) => conflictSel?.chiavi.includes(k));
                         return (
                           <td key={c.id} className="border-b border-edge px-2 py-2">
-                            <div
+                            <button
+                              type="button"
+                              onClick={() => {
+                                onSelectCell({
+                                  classe_id: c.id,
+                                  classe_nome: c.nome,
+                                  giorno: giorno.toUpperCase(),
+                                  ora: oraNum,
+                                });
+                                onSelectConflict({
+                                  chiavi,
+                                  classe_id: c.id,
+                                  giorno: giorno.toUpperCase(),
+                                  ora: oraNum,
+                                });
+                              }}
                               title="Ora non coperta: docenti o monte ore insufficienti"
-                              className="rounded-md border border-conflict bg-conflict/10 px-2 py-1 font-semibold text-conflict"
+                              className={`w-full rounded-md border border-conflict bg-conflict/10 px-2 py-1 text-left font-semibold text-conflict ${
+                                similar ? "ring-2 ring-conflict" : ""
+                              }`}
                             >
                               Scoperta
-                            </div>
+                            </button>
                           </td>
                         );
                       }
                       return (
                         <td key={c.id} className="border-b border-edge px-2 py-2">
-                          <div className="rounded-md border border-dashed border-edge bg-card px-2 py-1 text-muted-foreground">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              onSelectConflict(null);
+                              onSelectCell({
+                                classe_id: c.id,
+                                classe_nome: c.nome,
+                                giorno: giorno.toUpperCase(),
+                                ora: oraNum,
+                              });
+                            }}
+                            title="Assegna una lezione a mano"
+                            className="w-full rounded-md border border-dashed border-edge bg-card px-2 py-1 text-left text-muted-foreground hover:border-brand"
+                          >
                             Libera
-                          </div>
+                          </button>
                         </td>
                       );
                     }
@@ -538,7 +698,13 @@ function ScheduleTable({
                         ? "border-conflict bg-conflict/10"
                         : "border-theory bg-theory/10";
                     const dimmed =
-                      highlightTeacher && slot.docente_id !== highlightTeacher ? "opacity-35" : "";
+                      highlightTeacher && !conflictSel && slot.docente_id !== highlightTeacher
+                        ? "opacity-35"
+                        : "";
+                    // same conflict as the red cell the admin clicked
+                    const similar = (slot.conflitto_chiavi ?? []).some((k) =>
+                      conflictSel?.chiavi.includes(k),
+                    );
                     return (
                       <td
                         key={c.id}
@@ -547,24 +713,37 @@ function ScheduleTable({
                       >
                         <button
                           type="button"
-                          onClick={() => onSelectSlot(slot)}
+                          onClick={() => {
+                            onSelectSlot(slot);
+                            onSelectConflict(
+                              slot.conflitto && slot.conflitto_chiavi?.length
+                                ? {
+                                    chiavi: slot.conflitto_chiavi,
+                                    classe_id: slot.classe_id,
+                                    giorno: slot.giorno,
+                                    ora: slot.ora_inizio,
+                                  }
+                                : null,
+                            );
+                          }}
                           title={`Monte ore residuo non disponibile senza backend`}
-                          className={`w-full rounded-md border-l-2 px-2 py-1 text-left transition-opacity ${tone} ${dimmed}`}
+                          className={`w-full rounded-md border-l-2 px-2 py-1 text-left transition-opacity ${tone} ${dimmed} ${
+                            similar ? "ring-2 ring-conflict" : ""
+                          }`}
                         >
                           <span
                             role="link"
                             tabIndex={0}
-                            onClick={(e) => {
-                              e.stopPropagation();
+                            // No stopPropagation: a click on the name is a click on
+                            // the cell too (conflict band, manual-edit panel), it
+                            // just also highlights the docente.
+                            onClick={() => {
                               onHighlightTeacher(
                                 highlightTeacher === slot.docente_id ? null : slot.docente_id,
                               );
                             }}
                             onKeyDown={(e) => {
-                              if (e.key === "Enter") {
-                                e.stopPropagation();
-                                onHighlightTeacher(slot.docente_id);
-                              }
+                              if (e.key === "Enter") onHighlightTeacher(slot.docente_id);
                             }}
                             className="font-semibold underline-offset-2 hover:underline"
                           >
@@ -594,6 +773,9 @@ function SidePanel({
   selectedSlot,
   onCloseSlot,
   onSlotUpdated,
+  selectedCell,
+  onCloseCell,
+  onCellAssigned,
 }: {
   week: string;
   schedule: Schedule | null;
@@ -603,6 +785,9 @@ function SidePanel({
   selectedSlot: SlotLezione | null;
   onCloseSlot: () => void;
   onSlotUpdated: (s: Schedule) => void;
+  selectedCell: FreeCell | null;
+  onCloseCell: () => void;
+  onCellAssigned: (s: Schedule, message?: string) => void;
 }) {
   const [confirmingId, setConfirmingId] = useState<string | null>(null);
 
@@ -612,6 +797,16 @@ function SidePanel({
         <span className="size-2 rounded-full bg-brand" />
         <span className="font-display text-sm font-semibold">Copilota Orario</span>
       </div>
+
+      {selectedCell ? (
+        <AssignSlotPanel
+          key={`${selectedCell.classe_id}|${selectedCell.giorno}|${selectedCell.ora}`}
+          week={week}
+          cell={selectedCell}
+          onClose={onCloseCell}
+          onAssigned={onCellAssigned}
+        />
+      ) : null}
 
       {selectedSlot ? (
         <ModifySlotPanel
@@ -673,6 +868,93 @@ function SidePanel({
 
       <ChatPanel week={week} schedule={schedule} onScheduleUpdate={onScheduleUpdate} />
     </>
+  );
+}
+
+// Manual assignment ("forzatura") of a lesson to a free hour: pick one of the
+// docente/materia pairs assigned to the classe. Rules that can be relaxed
+// end up as conflicts; the backend refuses only what can't be broken.
+function AssignSlotPanel({
+  week,
+  cell,
+  onClose,
+  onAssigned,
+}: {
+  week: string;
+  cell: FreeCell;
+  onClose: () => void;
+  onAssigned: (s: Schedule, message?: string) => void;
+}) {
+  const [choice, setChoice] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+
+  const options = useQuery({
+    queryKey: ["assignable", week, cell.classe_id],
+    queryFn: () =>
+      api<{
+        options: {
+          docente_id: string;
+          docente_nome: string;
+          materia_id: string;
+          materia_nome: string;
+          ore_residue: number;
+        }[];
+      }>(`/api/schedule/${week}/assignable/${cell.classe_id}`),
+    retry: false,
+  });
+
+  const list = options.data?.options ?? [];
+  const selected = choice || (list[0] ? `${list[0].docente_id}|${list[0].materia_id}` : "");
+
+  async function submit() {
+    const [docente_id, materia_id] = selected.split("|");
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await api<ScheduleMutationResult>(`/api/schedule/${week}/assign-slot`, {
+        method: "POST",
+        body: {
+          classe_id: cell.classe_id,
+          giorno: cell.giorno,
+          ora_inizio: cell.ora,
+          docente_id,
+          materia_id,
+        },
+      });
+      onAssigned(requireSchedule(res), res.message);
+    } catch (err) {
+      setError(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="space-y-2 border-b border-edge px-4 py-3">
+      <div className="flex items-center">
+        <span className="label-mono">Assegna ora libera</span>
+        <button type="button" onClick={onClose} className="ml-auto text-[11px] text-muted-foreground">
+          Chiudi
+        </button>
+      </div>
+      <p className="text-[11px] text-muted-foreground">
+        {cell.classe_nome} · {GIORNI.find((g) => g.value === cell.giorno)?.label ?? cell.giorno} ·{" "}
+        {String(cell.ora).padStart(2, "0")}:00
+      </p>
+      <Select label="Docente e materia" value={selected} onChange={(e) => setChoice(e.target.value)}>
+        {list.map((o) => (
+          <option key={`${o.docente_id}|${o.materia_id}`} value={`${o.docente_id}|${o.materia_id}`}>
+            {o.docente_nome} · {o.materia_nome} ({o.ore_residue}h residue)
+          </option>
+        ))}
+      </Select>
+      {options.isError ? <p className="text-[11px] text-conflict">{apiErrorMessage(options.error)}</p> : null}
+      {error ? <p className="text-[11px] text-conflict">{apiErrorMessage(error)}</p> : null}
+      <Button variant="primary" className="w-full" onClick={submit} disabled={busy || !selected}>
+        {busy ? "Assegno…" : "Forza assegnazione"}
+      </Button>
+    </div>
   );
 }
 

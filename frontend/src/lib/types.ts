@@ -126,6 +126,8 @@ export interface SlotLezione {
   classe_accoppiata_id?: string;
   materia_tipo?: "TEORIA" | "PRATICA";
   conflitto?: boolean;
+  /** `chiave` of every conflict this lesson is part of. */
+  conflitto_chiavi?: string[];
   indisponibile?: boolean;
   materia_nome?: string;
   docente_nome?: string;
@@ -134,6 +136,8 @@ export interface SlotLezione {
 
 export interface Conflict {
   conflict_id: string;
+  /** Stable id (unlike conflict_id): what approve/reject is stored against. */
+  chiave?: string;
   description: string;
   suggested_action?: {
     action_type: string;

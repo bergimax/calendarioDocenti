@@ -5,7 +5,7 @@ from typing import Dict, Any
 from app.database import get_db
 from app.security import get_current_admin
 from app.services.schedule import ScheduleService
-from app.schemas import ScheduleGenerateRequest, ScheduleGenerateResponse, ModifySlotRequest, QuickActionRequest
+from app.schemas import ScheduleGenerateRequest, ScheduleGenerateResponse, ModifySlotRequest, QuickActionRequest, ApproveConflictRequest, RejectConflictRequest, AssignSlotRequest
 import logging
 
 logger = logging.getLogger(__name__)
@@ -142,6 +142,72 @@ def modify_slot(
 
     except Exception as e:
         logger.error(f"Error modifying slot: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/schedule/{week_start}/assignable/{classe_id}")
+def assignable_for_classe(
+    week_start: date,
+    classe_id: str,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Docente/materia pairs that can be assigned to a free hour of this classe."""
+    try:
+        return {"options": ScheduleService(db).assignable_for_classe(
+            _get_current_school_id(), week_start, classe_id,
+        )}
+    except Exception as e:
+        logger.error(f"Error listing assignable teachers: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/schedule/{week_start}/assign-slot")
+def assign_slot(
+    week_start: date,
+    request: AssignSlotRequest,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Manually assign a lesson to a free hour. Returns the updated schedule."""
+    try:
+        return ScheduleService(db).assign_slot(
+            _get_current_school_id(), week_start, request.classe_id, request.giorno.value,
+            request.ora_inizio, request.docente_id, request.materia_id,
+        )
+    except Exception as e:
+        logger.error(f"Error assigning slot: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/schedule/{week_start}/conflicts/approve")
+def approve_conflicts(
+    week_start: date,
+    request: ApproveConflictRequest,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Approve conflicts: they stop being reported. Returns the updated schedule."""
+    try:
+        return ScheduleService(db).approve_conflicts(
+            _get_current_school_id(), week_start, request.chiavi,
+        )
+    except Exception as e:
+        logger.error(f"Error approving conflicts: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/schedule/{week_start}/conflicts/reject")
+def reject_conflict(
+    week_start: date,
+    request: RejectConflictRequest,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Reject: remove the lesson at classe/giorno/ora and leave the hour free. Returns the updated schedule."""
+    try:
+        return ScheduleService(db).reject_conflict(
+            _get_current_school_id(), week_start,
+            request.classe_id, request.giorno.value, request.ora_inizio,
+        )
+    except Exception as e:
+        logger.error(f"Error rejecting conflict: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

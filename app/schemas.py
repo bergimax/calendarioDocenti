@@ -184,6 +184,8 @@ class SlotLezioneResponse(BaseModel):
     accoppiata: bool
     classe_accoppiata_id: Optional[str] = None
     conflitto: bool = False
+    # `chiave` of every conflict this lesson is part of (see ScheduleSolver.get_conflicts)
+    conflitto_chiavi: List[str] = []
     indisponibile: bool = False
 
     class Config:
@@ -220,6 +222,27 @@ class ModifySlotRequest(BaseModel):
     """Request to modify slot."""
     slot_id: str
     changes: Dict[str, Any]  # docente_id, giorno, ora_inizio, etc
+
+
+class AssignSlotRequest(BaseModel):
+    """Manually put a lesson into a free hour (a "forzatura": relaxable rules may end up as conflicts)."""
+    classe_id: str
+    giorno: Giorno
+    ora_inizio: int
+    docente_id: str
+    materia_id: str
+
+
+class ApproveConflictRequest(BaseModel):
+    """Approve conflicts (by their stable `chiave`): they stop being reported."""
+    chiavi: List[str]
+
+
+class RejectConflictRequest(BaseModel):
+    """Reject the lesson (or uncovered hour) at classe/giorno/ora: that hour is left free."""
+    classe_id: str
+    giorno: Giorno
+    ora_inizio: int
 
 
 class QuickActionRequest(BaseModel):

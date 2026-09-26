@@ -3,6 +3,7 @@ from sqlalchemy import and_
 from datetime import date, timedelta
 from typing import Optional, List
 from app.models import (
+    ConflittoGestito,
     OrarioSettimanale, SlotLezione, Assegnazione, Docente, Classe, Materia,
     DisponibilitaSettimanale, CalendarioAnnuale, MonteOreAnnuale, ClasseAccoppiata, Scuola
 )
@@ -224,6 +225,10 @@ class ScheduleRepository:
             if orario:
                 self.db.query(SlotLezione).filter(
                     SlotLezione.orario_settimanale_id == orario.id
+                ).delete(synchronize_session=False)
+                # a new solution: earlier approve/reject decisions no longer apply
+                self.db.query(ConflittoGestito).filter(
+                    ConflittoGestito.orario_settimanale_id == orario.id
                 ).delete(synchronize_session=False)
                 orario.stato = "BOZZA"
                 orario.quality_score = quality_score

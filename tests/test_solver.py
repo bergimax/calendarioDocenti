@@ -327,3 +327,35 @@ def test_calendar_day_longer_than_the_grid_is_capped_at_six_hours():
     solver = ScheduleSolver(_minimal_context(calendario=calendario))
     solver.build_model()
     assert solver.solve(timeout_seconds=10) in ("OPTIMAL", "FEASIBLE")
+
+
+def test_schedule_with_a_freed_mid_day_hour_can_still_be_evaluated():
+    """Admin "Rifiuta" leaves an hour free mid-day: evaluating the saved schedule must still work
+    (allow_gaps), or every conflict silently disappears from the grid."""
+    keys = {("a1", g, h) for g in range(5) for h in range(6) if (g, h) != (0, 2)}
+
+    strict = ScheduleSolver(_minimal_context(), best_effort=True)
+    strict.build_model()
+    assert strict.solve_fixed(keys) == "INFEASIBLE"  # the "no gaps" rule rejects it
+
+    evaluating = ScheduleSolver(_minimal_context(), best_effort=True, allow_gaps=True)
+    evaluating.build_model()
+    assert evaluating.solve_fixed(keys) in ("OPTIMAL", "FEASIBLE")
+
+
+def test_forced_mode_reports_an_hour_outside_the_day_instead_of_rejecting_it():
+    """A lesson forced beyond the calendar's day (ore_max 5, lesson at 13:00) is accepted in
+    forced mode and reported as a classe_over_capacity conflict on that hour."""
+    calendario = [CalendarioDati(date(2026, 4, 6 + g), g, ore_max_giornata=5) for g in range(5)]
+    ctx = _minimal_context(calendario=calendario)
+    keys = {("a1", g, h) for g in range(5) for h in range(6)}  # all 6 hours: one over the 5h day
+
+    strict = ScheduleSolver(ctx, best_effort=True, allow_gaps=True)
+    strict.build_model()
+    assert strict.solve_fixed(keys) == "INFEASIBLE"
+
+    forced = ScheduleSolver(ctx, forced=True)
+    forced.build_model()
+    assert forced.solve_fixed(keys) in ("OPTIMAL", "FEASIBLE")
+    over = [c for c in forced.get_conflicts() if c["chiave"].startswith("classe_over_capacity")]
+    assert over and all(c["ore_slot"] for c in over)
