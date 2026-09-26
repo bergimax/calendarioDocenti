@@ -286,3 +286,44 @@ def test_soft_constraint_weights_are_applied_to_objective():
     objective_coeffs = set(solver.model.Proto().objective.coeffs)
     assert objective_coeffs != {1}, "objective coefficients must include the real weights"
     assert objective_coeffs & weights_used, "objective should be built from the registered weights"
+
+
+def _short_on_hours_context():
+    """One classe, 6h/day required, but the only docente has just 3h left."""
+    assegnazioni = [
+        AssegnazioneDati("a1", "d1", "Prof Rossi", "ASSUNTO", "c1", "1A", "m1", "Matematica",
+                          "TEORIA", "ALTO", ore_residue=3),
+    ]
+    return _minimal_context(assegnazioni=assegnazioni)
+
+
+def test_strict_model_is_infeasible_when_hours_cannot_fill_the_week():
+    solver = ScheduleSolver(_short_on_hours_context())
+    solver.build_model()
+    assert solver.solve(timeout_seconds=10) == "INFEASIBLE"
+
+
+def test_best_effort_returns_fullest_schedule_and_reports_empty_hours():
+    solver = ScheduleSolver(_short_on_hours_context(), best_effort=True)
+    solver.build_model()
+    assert solver.solve(timeout_seconds=10) in ("OPTIMAL", "FEASIBLE")
+
+    slots = solver.extract_solution()
+    assert len(slots) == 3  # every hour the docente has left is used
+
+    unfilled = [c for c in solver.get_conflicts() if c.get("ore")]
+    assert unfilled, "uncovered hours must come back as conflicts"
+    # each classe/day is short by 6 minus the lessons it got that day
+    for c in unfilled:
+        lessons = sum(1 for s in slots if s["giorno"] == c["giorno"])
+        assert len(c["ore"]) == 6 - lessons
+        assert all(8 <= h <= 13 for h in c["ore"])
+        assert not any(s["giorno"] == c["giorno"] and s["ora_inizio"] in c["ore"] for s in slots)
+
+
+def test_calendar_day_longer_than_the_grid_is_capped_at_six_hours():
+    """An 8h calendar day can't be filled with 6 hourly slots: cap, don't go INFEASIBLE."""
+    calendario = [CalendarioDati(date(2026, 4, 6 + g), g, ore_max_giornata=8) for g in range(5)]
+    solver = ScheduleSolver(_minimal_context(calendario=calendario))
+    solver.build_model()
+    assert solver.solve(timeout_seconds=10) in ("OPTIMAL", "FEASIBLE")

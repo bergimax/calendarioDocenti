@@ -63,9 +63,9 @@ class ScheduleService:
                 )
 
             # 2. Build and solve model
-            solver = ScheduleSolver(context)
-            solver.build_model()
-            status = solver.solve(timeout_seconds=timeout_seconds)
+            solver, status, relaxed = self._solve_with_fallback(
+                context, timeout_seconds=timeout_seconds,
+            )
 
             # 3. Handle results
             if status in ["OPTIMAL", "FEASIBLE"]:
@@ -121,6 +121,11 @@ class ScheduleService:
                     slots=slot_responses,
                     conflicts=conflicts,
                     stage_cells=self.repo._stage_cells_for_week(scuola_id, week_start),
+                    message=(
+                        "Nessun orario completo possibile: generato il migliore disponibile, "
+                        "le ore non coperte e i vincoli forzati sono segnalati come conflitti."
+                        if relaxed else None
+                    ),
                 )
 
             elif status == "INFEASIBLE":
@@ -208,9 +213,7 @@ class ScheduleService:
             if asg:
                 assigned_keys.add((asg.assegnazione_id, GiornoEnum[s["giorno"]].value, s["ora_inizio"] - 8))
 
-        solver = ScheduleSolver(context)
-        solver.build_model()
-        status = solver.solve_fixed(assigned_keys)
+        solver, status, _ = self._solve_with_fallback(context, fixed_keys=assigned_keys)
         if status not in ("OPTIMAL", "FEASIBLE"):
             return []
 
@@ -230,15 +233,30 @@ class ScheduleService:
         scopes = [
             (c.get("classe_id"), c.get("docente_id"), c.get("giorno"))
             for c in conflicts
-            if c.get("giorno") and (c.get("classe_id") or c.get("docente_id"))
+            if (c.get("classe_id") or c.get("docente_id"))
+            # "classe_unfilled" conflicts ("ore" set) are about hours with no
+            # lesson: those cells are painted red on their own, the lessons
+            # the classe does have that day stay normal.
+            and not c.get("ore")
         ]
-        for s in slots:
-            s["conflitto"] = any(
-                s.get("giorno") == giorno
-                and ((classe_id and s.get("classe_id") == classe_id)
-                     or (docente_id and s.get("docente_id") == docente_id))
-                for classe_id, docente_id, giorno in scopes
+
+        def in_scope(s: Dict[str, Any], classe_id, docente_id, giorno) -> bool:
+            if giorno:
+                # a day-scoped conflict: any lesson of that classe or docente that day
+                return s.get("giorno") == giorno and (
+                    (classe_id and s.get("classe_id") == classe_id)
+                    or (docente_id and s.get("docente_id") == docente_id)
+                )
+            # no day (e.g. a docente's weekly hours off target in one classe):
+            # exactly that classe+docente's lessons. With only one of the two
+            # there is no sensible cell to point at, so leave it unmarked.
+            return bool(
+                classe_id and docente_id
+                and s.get("classe_id") == classe_id and s.get("docente_id") == docente_id
             )
+
+        for s in slots:
+            s["conflitto"] = any(in_scope(s, *scope) for scope in scopes)
 
     def _mark_slot_unavailability(
         self, slots: List[Dict[str, Any]], scuola_id: str, week_start: date,
@@ -274,6 +292,35 @@ class ScheduleService:
                 for h in range(s["ora_inizio"], s["ora_fine"])
             )
 
+    @staticmethod
+    def _solve_with_fallback(
+        context, timeout_seconds: int = 60, fixed_keys=None, **solver_kwargs,
+    ):
+        """
+        Solve with every classroom hour required to be filled; if that is
+        INFEASIBLE, solve again in best-effort mode (ScheduleSolver's
+        `best_effort`) so the admin still gets the fullest timetable
+        possible, with the uncovered hours reported as conflicts.
+        `fixed_keys` pins the assignment (solve_fixed) instead of searching.
+        Returns (solver, status, relaxed).
+        """
+        from app.domain.solver import ScheduleSolver
+
+        def run(best_effort: bool):
+            solver = ScheduleSolver(context, best_effort=best_effort, **solver_kwargs)
+            solver.build_model()
+            if fixed_keys is not None:
+                return solver, solver.solve_fixed(fixed_keys)
+            return solver, solver.solve(timeout_seconds=timeout_seconds)
+
+        solver, status = run(False)
+        if status != "INFEASIBLE":
+            return solver, status, False
+
+        logger.warning("Strict model INFEASIBLE, retrying in best-effort mode")
+        solver, status = run(True)
+        return solver, status, status in ("OPTIMAL", "FEASIBLE")
+
     def _identify_conflicts(self, context) -> list:
         """
         Attempt to identify which constraints conflict.
@@ -286,6 +333,7 @@ class ScheduleService:
 
         for asg in context.assegnazioni:
             has_feasible = False
+            disp = None
 
             # Quick check: if ore_residue is 0, no slots possible
             if asg.ore_residue <= 0:
@@ -480,9 +528,7 @@ class ScheduleService:
                 assigned_keys.add((asg.assegnazione_id, GiornoEnum[s.giorno].value, s.ora_inizio - 8))
         assigned_keys.add((target_asg.assegnazione_id, GiornoEnum[new_giorno].value, new_ora_inizio - 8))
 
-        solver = ScheduleSolver(context)
-        solver.build_model()
-        status = solver.solve_fixed(assigned_keys)
+        solver, status, _ = self._solve_with_fallback(context, fixed_keys=assigned_keys)
 
         if status not in ("OPTIMAL", "FEASIBLE"):
             return {
@@ -653,9 +699,9 @@ class ScheduleService:
         if not context.assegnazioni:
             return {"status": "error", "message": "No teacher-class-subject assignments found."}
 
-        solver = ScheduleSolver(context, **solver_kwargs)
-        solver.build_model()
-        status = solver.solve(timeout_seconds=timeout_seconds)
+        solver, status, _ = self._solve_with_fallback(
+            context, timeout_seconds=timeout_seconds, **solver_kwargs,
+        )
 
         if status not in ("OPTIMAL", "FEASIBLE"):
             return {

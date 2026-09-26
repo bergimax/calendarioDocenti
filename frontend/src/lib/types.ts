@@ -139,6 +139,11 @@ export interface Conflict {
     action_type: string;
     label: string;
   };
+  classe_id?: string | null;
+  docente_id?: string | null;
+  giorno?: string | null;
+  /** Hours (8-13) left without a lesson: the grid paints those empty cells red. */
+  ore?: number[];
 }
 
 export interface Schedule {

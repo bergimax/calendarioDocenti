@@ -80,11 +80,25 @@ const QUICK_ACTIONS = [
 // caller must check for that shape before treating the response as a
 // Schedule to display, or a rejection crashes the whole page (active.slots
 // is not iterable) instead of showing the backend's own error message.
-type ScheduleMutationResult = Schedule & { status?: string; message?: string };
+type ScheduleMutationResult = Schedule & {
+  status?: string;
+  message?: string;
+  conflicting_constraints?: string[];
+  suggested_deroghe?: string[];
+};
 
+// "infeasible" and "timeout" also come back as HTTP 200 with no slots, so
+// the check is on the shape (no slots array), not only on status === "error".
 function requireSchedule(res: ScheduleMutationResult): Schedule {
-  if (res.status === "error") {
-    throw new Error(res.message ?? "Operazione non riuscita");
+  if (res.status === "error" || !Array.isArray(res.slots)) {
+    const parts = [res.message ?? "Operazione non riuscita"];
+    if (res.conflicting_constraints?.length) {
+      parts.push(`Conflitti: ${res.conflicting_constraints.join("; ")}`);
+    }
+    if (res.suggested_deroghe?.length) {
+      parts.push(`Deroghe suggerite: ${res.suggested_deroghe.join(", ")}`);
+    }
+    throw new Error(parts.join(" "));
   }
   return res;
 }
@@ -376,6 +390,13 @@ function ScheduleTable({
       .filter((sc) => sc.giorno === giorno.toUpperCase())
       .map((sc) => sc.classe_id),
   );
+  // Empty hours the solver reports as uncovered ("classe_unfilled"): the
+  // "Libera" cell is painted red there instead of the neutral dashed box.
+  const unfilled = new Set<string>();
+  for (const c of schedule.conflicts ?? []) {
+    if (c.giorno !== giorno.toUpperCase() || !c.classe_id) continue;
+    for (const h of c.ore ?? []) unfilled.add(`${c.classe_id}|${h}`);
+  }
   const classeIndex = new Map(classi.map((c, i) => [c.id, i]));
 
   // A joint lesson can span more than 2 classi (a 4-way group is stored as
@@ -474,6 +495,18 @@ function ScheduleTable({
                     }
                     const slot = cellSlots.get(c.id);
                     if (!slot) {
+                      if (unfilled.has(`${c.id}|${Number.parseInt(ora, 10)}`)) {
+                        return (
+                          <td key={c.id} className="border-b border-edge px-2 py-2">
+                            <div
+                              title="Ora non coperta: docenti o monte ore insufficienti"
+                              className="rounded-md border border-conflict bg-conflict/10 px-2 py-1 font-semibold text-conflict"
+                            >
+                              Scoperta
+                            </div>
+                          </td>
+                        );
+                      }
                       return (
                         <td key={c.id} className="border-b border-edge px-2 py-2">
                           <div className="rounded-md border border-dashed border-edge bg-card px-2 py-1 text-muted-foreground">

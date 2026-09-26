@@ -148,6 +148,7 @@ class ScheduleSolver:
         exclude_docente_giorno: Optional[Set[Tuple[str, int]]] = None,
         max_hours_per_docente: Optional[Dict[str, int]] = None,
         max_consecutive_teoria: Optional[int] = None,
+        best_effort: bool = False,
     ):
         """
         Initialize solver with problem context.
@@ -163,8 +164,14 @@ class ScheduleSolver:
           (e.g. "riduci ore Prof Rossi a massimo 10").
         - max_consecutive_teoria: overrides the default 2-hour no-penalty
           cap for _soft_teoria_consecutive school-wide.
+        - best_effort: fallback for a week that is INFEASIBLE with every
+          classroom hour required to be filled. Turns that one rule (see
+          _constraint_day_capacity) into a heavily penalized goal, so the
+          solver returns the fullest timetable it can and each hour it could
+          not cover comes back as an itemized "classe_unfilled" conflict.
         """
         self.context = context
+        self.best_effort = best_effort
         self.deroga = deroga
         self.exclude_docente_giorno = exclude_docente_giorno or set()
         self.max_hours_per_docente = max_hours_per_docente or {}
@@ -371,6 +378,14 @@ class ScheduleSolver:
 
     def _ore_max_for_classe_giorno(self, classe_id: str, giorno: int) -> int:
         """
+        Daily hour cap for a classe on a giorno, never more than the 6 hours
+        (8:00-14:00) the model has variables for: a calendar day of 8h can't
+        be filled, so requiring it made the whole week INFEASIBLE.
+        """
+        return min(self._ore_max_for_classe_giorno_raw(classe_id, giorno), 6)
+
+    def _ore_max_for_classe_giorno_raw(self, classe_id: str, giorno: int) -> int:
+        """
         Resolve the daily hour cap for a classe on a given giorno.
         Looks for a calendar row scoped to this classe's gruppo first (a
         per-year-group PDF calendar), then falls back to a school-wide row
@@ -536,8 +551,25 @@ class ScheduleSolver:
                     if (asg.assegnazione_id, giorno, ora) in self.x
                 ]
 
-                if hours_in_day:
+                if not hours_in_day:
+                    continue
+                if not self.best_effort or ore_max == 0:
                     self.model.Add(sum(hours_in_day) == ore_max)
+                    continue
+
+                # Best effort: fewer hours than ore_max is allowed, at a
+                # per-missing-hour cost above every RELAX_WEIGHT (1000), so
+                # a hole is only left when filling it would take more than
+                # the relaxations that are already available.
+                self.model.Add(sum(hours_in_day) <= ore_max)
+                shortfall = self.model.NewIntVar(0, ore_max, f"unfilled_{classe_id}_{giorno}")
+                self.model.Add(shortfall == ore_max - sum(hours_in_day))
+                self.soft_penalties.append(SoftPenalty(
+                    var=shortfall, weight=1500, kind="classe_unfilled",
+                    description=f"{asgs[0].classe_nome}: ore senza lezione",
+                    classe_id=classe_id, giorno=giorno,
+                    hour_vars=hours_in_day, ore_target=ore_max,
+                ))
 
     def _constraint_no_classe_schedule_gaps(self) -> None:
         """
@@ -1453,6 +1485,17 @@ class ScheduleSolver:
                 else:
                     suggested_action = None
 
+            ore_vuote: Optional[List[int]] = None
+            if p.kind == "classe_unfilled":
+                ore_vuote = self._unfilled_hours(p)
+                description = (
+                    f"{p.description} - {GIORNI_NOMI_IT[GiornoEnum(p.giorno).name]}: "
+                    f"{len(ore_vuote)} ora/e non coperta/e "
+                    f"({', '.join(f'{h}:00' for h in ore_vuote)}), "
+                    "docenti o monte ore insufficienti"
+                )
+                suggested_action = None
+
             dedup_key = (p.kind, p.classe_id, p.docente_id, p.giorno)
             if dedup_key in seen:
                 continue
@@ -1468,6 +1511,32 @@ class ScheduleSolver:
                 "classe_id": p.classe_id,
                 "docente_id": p.docente_id,
                 "giorno": GiornoEnum(p.giorno).name if p.giorno is not None else None,
+                # Only for "classe_unfilled": the hours (8-13) left without a
+                # lesson, so the grid can paint those empty cells red.
+                **({"ore": ore_vuote} if ore_vuote is not None else {}),
             })
 
         return conflicts
+
+    def _unfilled_hours(self, p: SoftPenalty) -> List[int]:
+        """
+        Which hours (8-13) of a "classe_unfilled" classe/giorno have no
+        lesson: the free hours of the day's window (from its earliest
+        allowed start for ore_target hours), topped up with any other free
+        hour if a lesson block sits outside that window.
+        """
+        occupied = set()
+        for asg in self.context.assegnazioni:
+            if asg.classe_id != p.classe_id:
+                continue
+            for ora in range(6):
+                var = self.x.get((asg.assegnazione_id, p.giorno, ora))
+                if var is not None and self.solver.Value(var) == 1:
+                    occupied.add(ora)
+
+        missing = (p.ore_target or 0) - len(occupied)
+        start = max((self._ora_inizio_min_for_classe_giorno(p.classe_id, p.giorno) or 8) - 8, 0)
+        window = list(range(start, min(6, start + (p.ore_target or 0))))
+        free = [h for h in window if h not in occupied]
+        free += [h for h in range(6) if h not in occupied and h not in window]
+        return [8 + h for h in sorted(free[:max(missing, 0)])]
