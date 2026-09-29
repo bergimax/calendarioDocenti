@@ -28,9 +28,12 @@ farlo al posto tuo.
 2. **Create a VM Instance** → scegli:
    - **Image**: Ubuntu 24.04 (più semplice da amministrare di Oracle Linux)
    - **Shape**: `VM.Standard.A1.Flex` (ARM, Always Free fino a 4 OCPU/24GB —
-     abbondante per Postgres + OR-Tools + WeasyPrint) oppure uno dei due
-     `VM.Standard.E2.1.Micro` (AMD, sempre Always Free, più piccoli) se A1
-     non è disponibile nella tua region/tenancy
+     abbondante per Postgres + OR-Tools + WeasyPrint). È la shape più
+     richiesta: se la creazione fallisce con *"Out of capacity for shape
+     VM.Standard.A1.Flex"*, prova un'altra regione (Francoforte, Amsterdam,
+     Zurigo...) o passa a `VM.Standard.E2.1.Micro` (AMD, sempre Always
+     Free, quasi sempre disponibile subito, ma solo 1 OCPU/1GB RAM — vedi
+     la nota sotto, **richiede lo swap file del passo 3bis**)
    - **Add SSH keys**: genera o incolla la tua chiave pubblica (`ssh-keygen`
      in locale se non ne hai già una)
 3. Nella VCN/Security List creata insieme alla VM, aggiungi due *Ingress
@@ -49,6 +52,24 @@ sudo iptables -I INPUT -p tcp --dport 80 -j ACCEPT
 sudo iptables -I INPUT -p tcp --dport 443 -j ACCEPT
 sudo netfilter-persistent save 2>/dev/null || true
 ```
+
+### 1bis. Se sei finito su `VM.Standard.E2.1.Micro` (1GB RAM)
+
+Postgres + il solver OR-Tools + WeasyPrint + Node insieme possono superare
+1GB durante la generazione di un orario. Senza swap, il kernel Linux uccide
+a caso il container che sta usando più memoria in quel momento (di solito
+postgres) invece di limitarsi a rallentare — un click su "Genera orario"
+potrebbe far cadere il database. Prima di `deploy/up.sh`, sulla VM:
+
+```bash
+deploy/setup-swap.sh
+```
+
+Aggiunge 4GB di swap (persistente ai riavvii). Il generatore sarà più lento
+sotto carico (swap invece di RAM vera), ma non va più in crash. Se in
+seguito Oracle libera capacità A1.Flex, conviene ricreare la VM su quella
+shape: `deploy/dump-local-db.sh` + `restore-db.sh` rendono la migrazione
+rapida.
 
 ---
 
