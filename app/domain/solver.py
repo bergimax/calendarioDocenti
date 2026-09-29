@@ -105,6 +105,9 @@ class DerogaConfig:
     action_type: str  # one of the QUICK_ACTIONS below
     classe_id: Optional[str] = None
     docente_id: Optional[str] = None
+    # authorize_single_classe_day: restrict the relaxation to one giorno
+    # (0-4, GiornoEnum) instead of every day of the week.
+    giorno: Optional[int] = None
     # force_3_hours_theory: the raised no-penalty consecutive-hours cap
     # (defaults to 3 if not given). reduce_contract_hours: an explicit
     # weekly-hours ceiling for this assegnazione (defaults to halving the
@@ -296,17 +299,21 @@ class ScheduleSolver:
         self._constraint_chat_exclusions()
         self._constraint_chat_max_hours()
 
-    def _deroga_active(self, action_type: str, *, classe_id: str = None, docente_id: str = None) -> bool:
+    def _deroga_active(
+        self, action_type: str, *, classe_id: str = None, docente_id: str = None, giorno: int = None,
+    ) -> bool:
         """
         True if `self.deroga` requests relaxing `action_type` and, when the
-        deroga is scoped to a classe/docente, the given one matches (an
-        unscoped deroga applies to everyone).
+        deroga is scoped to a classe/docente/giorno, the given one matches
+        (an unscoped deroga applies to everyone/every day).
         """
         if not self.deroga or self.deroga.action_type != action_type:
             return False
         if self.deroga.classe_id and classe_id and self.deroga.classe_id != classe_id:
             return False
         if self.deroga.docente_id and docente_id and self.deroga.docente_id != docente_id:
+            return False
+        if self.deroga.giorno is not None and giorno is not None and self.deroga.giorno != giorno:
             return False
         return True
 
@@ -812,8 +819,8 @@ class ScheduleSolver:
         weight, so the solver only exceeds the cap when there is truly no
         other way to fill the week, and every such case is surfaced by
         get_conflicts() with the "authorize_single_classe_day" deroga
-        (scoped to that docente) - never silent. Paired lessons count once
-        (see _paired_assignment_ids_to_dedupe).
+        (scoped to that docente/classe/giorno) - never silent. Paired
+        lessons count once (see _paired_assignment_ids_to_dedupe).
         """
         RELAX_WEIGHT = 1000
         MAX_HOURS_PER_CLASSE_DAY = 4
@@ -828,14 +835,17 @@ class ScheduleSolver:
             classi_ids = {a.classe_id for a in asgs}
             if len(classi_ids) < 2:
                 continue
-            if self._deroga_active("authorize_single_classe_day", docente_id=docente_id):
-                continue
 
             for classe_id in classi_ids:
                 classe_asgs = [a for a in asgs if a.classe_id == classe_id and a.assegnazione_id not in skip_ids]
                 if not classe_asgs:
                     continue
                 for giorno in range(5):
+                    if self._deroga_active(
+                        "authorize_single_classe_day", docente_id=docente_id, classe_id=classe_id, giorno=giorno,
+                    ):
+                        continue
+
                     hours = [
                         self.x[(a.assegnazione_id, giorno, ora)]
                         for a in classe_asgs
@@ -1318,8 +1328,9 @@ class ScheduleSolver:
         _soft_teoria_consecutive) - admin-observed 2026-09-18 as an
         undesirable default pattern, but explicitly not a hard rule: the
         admin may want exactly this on purpose (e.g. a project day), so the
-        "authorize_single_classe_day" deroga (scoped to that docente) turns
-        the penalty off for a single generation run.
+        "authorize_single_classe_day" deroga (scoped to that
+        docente/classe/giorno) turns the penalty off for a single
+        generation run.
 
         Only meaningful for a docente with >=2 distinct classi overall - one
         who only ever teaches a single classe has no alternative, so isn't
@@ -1341,9 +1352,6 @@ class ScheduleSolver:
             if len(classi_ids) < 2:
                 continue
 
-            if self._deroga_active("authorize_single_classe_day", docente_id=docente_id):
-                continue
-
             docente_nome = asgs[0].docente_nome
 
             for giorno in range(5):
@@ -1356,6 +1364,11 @@ class ScheduleSolver:
                 )
 
                 for classe_id in classi_ids:
+                    if self._deroga_active(
+                        "authorize_single_classe_day", docente_id=docente_id, classe_id=classe_id, giorno=giorno,
+                    ):
+                        continue
+
                     classe_asgs = [a for a in asgs if a.classe_id == classe_id]
                     hours_with_classe = sum(
                         self.x[(a.assegnazione_id, giorno, ora)]

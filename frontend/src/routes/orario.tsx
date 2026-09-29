@@ -76,7 +76,7 @@ const ORE_OPTIONS = [8, 9, 10, 11, 12, 13].map((h) => ({ value: h, label: `${Str
 // actually scopes by (see app/domain/solver.py _deroga_active call sites) -
 // leaving a select on its "Tutti/e" default applies the deroga school-wide,
 // same as the old unscoped buttons did.
-type QuickActionField = "classe" | "docente" | "max_hours";
+type QuickActionField = "classe" | "docente" | "giorno" | "max_hours";
 
 const QUICK_ACTIONS: {
   action_type: string;
@@ -122,7 +122,7 @@ const QUICK_ACTIONS: {
     action_type: "authorize_single_classe_day",
     label: "Autorizza giornata mono-classe",
     description: "Permette a un docente di passare un'intera giornata su una sola classe.",
-    fields: ["docente"],
+    fields: ["docente", "classe", "giorno"],
   },
   {
     action_type: "authorize_friday_late_start",
@@ -231,11 +231,16 @@ function SchedulePage() {
   }
 
   // Applies a suggested_action straight from a conflict card, scoped to
-  // that conflict's own classe/docente (unlike the top-bar QuickActionDialog
-  // buttons, which default to school-wide unless the admin picks a scope).
+  // that conflict's own classe/docente/giorno (unlike the top-bar
+  // QuickActionDialog buttons, which default to school-wide unless the
+  // admin picks a scope).
   async function applyQuickAction(
     actionType: string,
-    opts?: { classId?: string | null | undefined; teacherId?: string | null | undefined },
+    opts?: {
+      classId?: string | null | undefined;
+      teacherId?: string | null | undefined;
+      giorno?: string | null | undefined;
+    },
   ) {
     try {
       const res = await api<ScheduleMutationResult>(`/api/schedule/${week}/apply-quick-action`, {
@@ -244,6 +249,7 @@ function SchedulePage() {
           action_type: actionType,
           class_id: opts?.classId ?? undefined,
           teacher_id: opts?.teacherId ?? undefined,
+          giorno: opts?.giorno ?? undefined,
         },
       });
       const updated = requireSchedule(res);
@@ -864,7 +870,11 @@ function SidePanel({
   onScheduleUpdate: (s: Schedule) => void;
   onQuickAction: (
     actionType: string,
-    opts?: { classId?: string | null | undefined; teacherId?: string | null | undefined },
+    opts?: {
+      classId?: string | null | undefined;
+      teacherId?: string | null | undefined;
+      giorno?: string | null | undefined;
+    },
   ) => void;
   selectedSlot: SlotLezione | null;
   onCloseSlot: () => void;
@@ -924,6 +934,7 @@ function SidePanel({
                           onQuickAction(c.suggested_action!.action_type, {
                             classId: c.classe_id,
                             teacherId: c.docente_id,
+                            giorno: c.giorno,
                           });
                         }}
                       >
@@ -1063,6 +1074,7 @@ function QuickActionDialog({
   const [open, setOpen] = useState(false);
   const [classeId, setClasseId] = useState("");
   const [docenteId, setDocenteId] = useState("");
+  const [giorno, setGiorno] = useState("");
   const [maxHours, setMaxHours] = useState(action.maxHoursDefault ? String(action.maxHoursDefault) : "");
   const [busy, setBusy] = useState(false);
 
@@ -1076,6 +1088,7 @@ function QuickActionDialog({
   function reset() {
     setClasseId("");
     setDocenteId("");
+    setGiorno("");
     setMaxHours(action.maxHoursDefault ? String(action.maxHoursDefault) : "");
   }
 
@@ -1088,6 +1101,7 @@ function QuickActionDialog({
           action_type: action.action_type,
           class_id: classeId || undefined,
           teacher_id: docenteId || undefined,
+          giorno: giorno || undefined,
           max_hours: maxHours ? Number(maxHours) : undefined,
         },
       });
@@ -1135,6 +1149,16 @@ function QuickActionDialog({
               {(teachers.data ?? []).map((t) => (
                 <option key={t.teacher_id} value={t.teacher_id}>
                   {t.nome}
+                </option>
+              ))}
+            </Select>
+          ) : null}
+          {action.fields.includes("giorno") ? (
+            <Select label="Giorno" value={giorno} onChange={(e) => setGiorno(e.target.value)}>
+              <option value="">Tutta la settimana</option>
+              {GIORNI.map(({ value, label }) => (
+                <option key={value} value={value}>
+                  {label}
                 </option>
               ))}
             </Select>

@@ -961,6 +961,7 @@ class ScheduleService:
         action_type: str,
         class_id: Optional[str] = None,
         teacher_id: Optional[str] = None,
+        giorno: Optional[str] = None,
         max_hours: Optional[int] = None,
         timeout_seconds: int = 60,
     ) -> Dict[str, Any]:
@@ -969,20 +970,25 @@ class ScheduleService:
         this week and re-solve, replacing the current schedule's slots in
         place (same schedule_id) with the result.
         """
-        from app.domain.solver import DerogaConfig
+        from app.domain.solver import DerogaConfig, GiornoEnum
 
         if action_type not in QUICK_ACTIONS:
             return {"status": "error", "message": f"Unknown quick action: {action_type!r}"}
 
+        if giorno is not None and giorno not in GiornoEnum.__members__:
+            return {"status": "error", "message": f"Invalid giorno: {giorno!r}"}
+        giorno_idx = GiornoEnum[giorno].value if giorno is not None else None
+
         deroga = DerogaConfig(
-            action_type=action_type, classe_id=class_id, docente_id=teacher_id, max_hours=max_hours,
+            action_type=action_type, classe_id=class_id, docente_id=teacher_id,
+            giorno=giorno_idx, max_hours=max_hours,
         )
         return self._regenerate_in_place(
             scuola_id, week_start,
             azione="QUICK_ACTION",
             dettagli={
                 "action_type": action_type, "class_id": class_id, "teacher_id": teacher_id,
-                "max_hours": max_hours,
+                "giorno": giorno, "max_hours": max_hours,
             },
             timeout_seconds=timeout_seconds,
             deroga=deroga,
