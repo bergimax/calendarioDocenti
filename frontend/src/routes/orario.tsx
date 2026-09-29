@@ -2,8 +2,17 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { AppShell } from "@/components/AppShell";
-import { Badge, Button, Select } from "@/components/ui-kit";
+import { Badge, Button, Field, Select } from "@/components/ui-kit";
 import { ErrorState, LoadingState } from "@/components/States";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
 import { API_BASE_URL, api, apiErrorMessage } from "@/lib/api";
 import type { ChatMessage, Conflict, Schedule, SlotLezione, Teacher, Week } from "@/lib/types";
 
@@ -63,14 +72,71 @@ const GIORNI = [
 // SlotLezioneResponse.ora_inizio is an int (8..13); option values must match.
 const ORE_OPTIONS = [8, 9, 10, 11, 12, 13].map((h) => ({ value: h, label: `${String(h).padStart(2, "0")}:00` }));
 
-const QUICK_ACTIONS = [
-  { action_type: "force_3_hours_theory", label: "Forza 3 ore teoria" },
-  { action_type: "reduce_contract_hours", label: "Riduci ore docente a contratto" },
-  { action_type: "authorize_early_exit", label: "Autorizza uscita anticipata" },
-  { action_type: "override_availability", label: "Deroga disponibilità" },
-  { action_type: "authorize_single_classe_day", label: "Autorizza giornata mono-classe" },
-  { action_type: "authorize_friday_late_start", label: "Autorizza inizio posticipato di venerdì" },
-  { action_type: "authorize_short_pratica_block", label: "Autorizza blocco pratica corto" },
+// Fields each quick action's dialog collects, and which the backend deroga
+// actually scopes by (see app/domain/solver.py _deroga_active call sites) -
+// leaving a select on its "Tutti/e" default applies the deroga school-wide,
+// same as the old unscoped buttons did.
+type QuickActionField = "classe" | "docente" | "max_hours";
+
+const QUICK_ACTIONS: {
+  action_type: string;
+  label: string;
+  description: string;
+  fields: QuickActionField[];
+  maxHoursLabel?: string;
+  maxHoursDefault?: number;
+  maxHoursPlaceholder?: string;
+}[] = [
+  {
+    action_type: "force_3_hours_theory",
+    label: "Forza ore teoria",
+    description:
+      "Di norma non si superano 2 ore consecutive di teoria dello stesso docente sulla stessa classe. Qui puoi autorizzare un tetto più alto per tutta la settimana.",
+    fields: ["classe", "docente", "max_hours"],
+    maxHoursLabel: "Ore consecutive massime",
+    maxHoursDefault: 3,
+  },
+  {
+    action_type: "reduce_contract_hours",
+    label: "Riduci ore docente a contratto",
+    description:
+      "Abbassa il monte ore target di questa settimana per un docente a contratto.",
+    fields: ["docente", "max_hours"],
+    maxHoursLabel: "Ore massime questa settimana",
+    maxHoursPlaceholder: "Vuoto = dimezza il target",
+  },
+  {
+    action_type: "authorize_early_exit",
+    label: "Autorizza uscita anticipata",
+    description:
+      "Permette a un docente a contratto di avere buchi orari (uscire e rientrare) invece di un blocco continuo.",
+    fields: ["docente"],
+  },
+  {
+    action_type: "override_availability",
+    label: "Deroga disponibilità",
+    description: "Ignora, solo per questa settimana, la disponibilità dichiarata dal docente.",
+    fields: ["docente"],
+  },
+  {
+    action_type: "authorize_single_classe_day",
+    label: "Autorizza giornata mono-classe",
+    description: "Permette a un docente di passare un'intera giornata su una sola classe.",
+    fields: ["docente"],
+  },
+  {
+    action_type: "authorize_friday_late_start",
+    label: "Autorizza inizio posticipato di venerdì",
+    description: "Permette a una classe di non iniziare alle 8:00 il venerdì.",
+    fields: ["classe"],
+  },
+  {
+    action_type: "authorize_short_pratica_block",
+    label: "Autorizza blocco pratica corto",
+    description:
+      "Permette un blocco di laboratorio più corto di 3 ore, o non contiguo, per una classe.",
+    fields: ["classe"],
+  },
 ];
 
 // generate/regenerate, modify-slot and apply-quick-action all reply with
@@ -164,11 +230,21 @@ function SchedulePage() {
     }
   }
 
-  async function applyQuickAction(actionType: string) {
+  // Applies a suggested_action straight from a conflict card, scoped to
+  // that conflict's own classe/docente (unlike the top-bar QuickActionDialog
+  // buttons, which default to school-wide unless the admin picks a scope).
+  async function applyQuickAction(
+    actionType: string,
+    opts?: { classId?: string | null | undefined; teacherId?: string | null | undefined },
+  ) {
     try {
       const res = await api<ScheduleMutationResult>(`/api/schedule/${week}/apply-quick-action`, {
         method: "POST",
-        body: { action_type: actionType, parameters: {} },
+        body: {
+          action_type: actionType,
+          class_id: opts?.classId ?? undefined,
+          teacher_id: opts?.teacherId ?? undefined,
+        },
       });
       const updated = requireSchedule(res);
       setSchedule(updated);
@@ -411,15 +487,20 @@ function SchedulePage() {
           />
         ) : null}
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           {QUICK_ACTIONS.map((a) => (
-            <Button
+            <QuickActionDialog
               key={a.action_type}
-              onClick={() => applyQuickAction(a.action_type)}
+              action={a}
+              classi={classi}
+              week={week}
               disabled={!active}
-            >
-              {a.label}
-            </Button>
+              onApplied={(updated, message) => {
+                setSchedule(updated);
+                setNotice(message);
+              }}
+              onError={setNotice}
+            />
           ))}
         </div>
       </div>
@@ -781,7 +862,10 @@ function SidePanel({
   schedule: Schedule | null;
   conflicts: Conflict[];
   onScheduleUpdate: (s: Schedule) => void;
-  onQuickAction: (actionType: string) => void;
+  onQuickAction: (
+    actionType: string,
+    opts?: { classId?: string | null | undefined; teacherId?: string | null | undefined },
+  ) => void;
   selectedSlot: SlotLezione | null;
   onCloseSlot: () => void;
   onSlotUpdated: (s: Schedule) => void;
@@ -837,7 +921,10 @@ function SidePanel({
                         className="font-semibold text-conflict"
                         onClick={() => {
                           setConfirmingId(null);
-                          onQuickAction(c.suggested_action!.action_type);
+                          onQuickAction(c.suggested_action!.action_type, {
+                            classId: c.classe_id,
+                            teacherId: c.docente_id,
+                          });
                         }}
                       >
                         Sì
@@ -955,6 +1042,124 @@ function AssignSlotPanel({
         {busy ? "Assegno…" : "Forza assegnazione"}
       </Button>
     </div>
+  );
+}
+
+function QuickActionDialog({
+  action,
+  classi,
+  week,
+  disabled,
+  onApplied,
+  onError,
+}: {
+  action: (typeof QUICK_ACTIONS)[number];
+  classi: { id: string; nome: string }[];
+  week: string;
+  disabled: boolean;
+  onApplied: (schedule: Schedule, message: string) => void;
+  onError: (message: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [classeId, setClasseId] = useState("");
+  const [docenteId, setDocenteId] = useState("");
+  const [maxHours, setMaxHours] = useState(action.maxHoursDefault ? String(action.maxHoursDefault) : "");
+  const [busy, setBusy] = useState(false);
+
+  const teachers = useQuery({
+    queryKey: ["teachers"],
+    queryFn: () => api<Teacher[]>("/api/teachers"),
+    enabled: open && action.fields.includes("docente"),
+    retry: false,
+  });
+
+  function reset() {
+    setClasseId("");
+    setDocenteId("");
+    setMaxHours(action.maxHoursDefault ? String(action.maxHoursDefault) : "");
+  }
+
+  async function submit() {
+    setBusy(true);
+    try {
+      const res = await api<ScheduleMutationResult>(`/api/schedule/${week}/apply-quick-action`, {
+        method: "POST",
+        body: {
+          action_type: action.action_type,
+          class_id: classeId || undefined,
+          teacher_id: docenteId || undefined,
+          max_hours: maxHours ? Number(maxHours) : undefined,
+        },
+      });
+      const updated = requireSchedule(res);
+      onApplied(updated, `Deroga applicata · nuovo punteggio ${Math.round(updated.quality_score)}`);
+      setOpen(false);
+      reset();
+    } catch (err) {
+      onError(apiErrorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next);
+        if (!next) reset();
+      }}
+    >
+      <DialogTrigger asChild>
+        <Button disabled={disabled}>{action.label}</Button>
+      </DialogTrigger>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>{action.label}</DialogTitle>
+          <DialogDescription>{action.description}</DialogDescription>
+        </DialogHeader>
+        <div className="space-y-2">
+          {action.fields.includes("classe") ? (
+            <Select label="Classe" value={classeId} onChange={(e) => setClasseId(e.target.value)}>
+              <option value="">Tutte le classi</option>
+              {classi.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.nome}
+                </option>
+              ))}
+            </Select>
+          ) : null}
+          {action.fields.includes("docente") ? (
+            <Select label="Docente" value={docenteId} onChange={(e) => setDocenteId(e.target.value)}>
+              <option value="">Tutti i docenti</option>
+              {(teachers.data ?? []).map((t) => (
+                <option key={t.teacher_id} value={t.teacher_id}>
+                  {t.nome}
+                </option>
+              ))}
+            </Select>
+          ) : null}
+          {action.fields.includes("max_hours") ? (
+            <Field
+              label={action.maxHoursLabel ?? "Ore massime"}
+              type="number"
+              min={1}
+              value={maxHours}
+              onChange={(e) => setMaxHours(e.target.value)}
+              placeholder={action.maxHoursPlaceholder}
+            />
+          ) : null}
+        </div>
+        <DialogFooter>
+          <Button variant="ghost" onClick={() => setOpen(false)} disabled={busy}>
+            Annulla
+          </Button>
+          <Button variant="primary" onClick={submit} disabled={busy}>
+            {busy ? "Applico…" : "Applica e ricalcola"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 

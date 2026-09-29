@@ -961,6 +961,7 @@ class ScheduleService:
         action_type: str,
         class_id: Optional[str] = None,
         teacher_id: Optional[str] = None,
+        max_hours: Optional[int] = None,
         timeout_seconds: int = 60,
     ) -> Dict[str, Any]:
         """
@@ -973,11 +974,16 @@ class ScheduleService:
         if action_type not in QUICK_ACTIONS:
             return {"status": "error", "message": f"Unknown quick action: {action_type!r}"}
 
-        deroga = DerogaConfig(action_type=action_type, classe_id=class_id, docente_id=teacher_id)
+        deroga = DerogaConfig(
+            action_type=action_type, classe_id=class_id, docente_id=teacher_id, max_hours=max_hours,
+        )
         return self._regenerate_in_place(
             scuola_id, week_start,
             azione="QUICK_ACTION",
-            dettagli={"action_type": action_type, "class_id": class_id, "teacher_id": teacher_id},
+            dettagli={
+                "action_type": action_type, "class_id": class_id, "teacher_id": teacher_id,
+                "max_hours": max_hours,
+            },
             timeout_seconds=timeout_seconds,
             deroga=deroga,
         )
@@ -1074,7 +1080,7 @@ class ScheduleService:
         ScheduleSolver.__init__), then replace this week's slots in place
         (same schedule_id).
         """
-        from app.models import OrarioSettimanale, SlotLezione, AuditLog
+        from app.models import OrarioSettimanale, SlotLezione, AuditLog, ConflittoGestito
         from app.domain.solver import ScheduleSolver
 
         orario = self.db.query(OrarioSettimanale).filter(

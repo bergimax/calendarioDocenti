@@ -250,6 +250,7 @@ class QuickActionRequest(BaseModel):
     action_type: str  # "force_3_hours_theory", "reduce_contract", etc
     class_id: Optional[str] = None
     teacher_id: Optional[str] = None
+    max_hours: Optional[int] = None
     parameters: Optional[Dict[str, Any]] = None
 
 

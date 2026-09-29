@@ -230,6 +230,7 @@ def apply_quick_action(
             action_type=request.action_type,
             class_id=request.class_id,
             teacher_id=request.teacher_id,
+            max_hours=request.max_hours,
         )
 
     except Exception as e:

@@ -105,6 +105,11 @@ class DerogaConfig:
     action_type: str  # one of the QUICK_ACTIONS below
     classe_id: Optional[str] = None
     docente_id: Optional[str] = None
+    # force_3_hours_theory: the raised no-penalty consecutive-hours cap
+    # (defaults to 3 if not given). reduce_contract_hours: an explicit
+    # weekly-hours ceiling for this assegnazione (defaults to halving the
+    # normal target if not given).
+    max_hours: Optional[int] = None
 
 
 @dataclass
@@ -1051,11 +1056,11 @@ class ScheduleSolver:
             # ("imposta massimo 3 ore consecutive di teoria").
             max_consecutive = self.max_consecutive_teoria if self.max_consecutive_teoria is not None else 2
 
-            # Deroga: "Forza 3 ore teoria" - raise the no-penalty cap to 3
-            # consecutive hours for this classe (or every classe, if the
-            # deroga isn't scoped to one).
-            if self._deroga_active("force_3_hours_theory", classe_id=classe_id):
-                max_consecutive = 3
+            # Deroga: "Forza N ore teoria" - raise the no-penalty cap (default
+            # 3, or the admin-chosen value) for this classe/docente pair (or
+            # every pair, on whichever side of the scope is left unset).
+            if self._deroga_active("force_3_hours_theory", classe_id=classe_id, docente_id=docente_id):
+                max_consecutive = self.deroga.max_hours or 3
 
             for giorno in range(5):
                 # Check 3-hour windows (e.g., ora 0-1-2, 1-2-3, etc.)
@@ -1195,21 +1200,31 @@ class ScheduleSolver:
             # Target: spread residual hours evenly across remaining weeks
             ore_target = max(1, asg.ore_residue // weeks_in_year)
 
-            # Deroga: "Riduci ore docente a contratto" - halve this week's
-            # target for the affected CONTRATTO docente(i), steering the
-            # optimizer toward assigning them fewer hours this run.
+            # Deroga: "Riduci ore docente a contratto" - cap this week's
+            # target for the affected CONTRATTO docente(i) at the
+            # admin-chosen ceiling (or, if none was given, halve it as
+            # before), steering the optimizer toward assigning them fewer
+            # hours this run.
             if (
                 self.context.docenti_map.get(asg.docente_id) == "CONTRATTO"
                 and self._deroga_active("reduce_contract_hours", docente_id=asg.docente_id)
             ):
-                ore_target = max(1, ore_target // 2)
+                ore_target = (
+                    max(1, min(ore_target, self.deroga.max_hours))
+                    if self.deroga.max_hours
+                    else max(1, ore_target // 2)
+                )
 
             target_detail = (
                 f"monte ore residuo {asg.ore_residue}h su {weeks_in_year} "
                 f"settiman{'a' if weeks_in_year == 1 else 'e'} rimanenti"
             )
             if ore_target != max(1, asg.ore_residue // weeks_in_year):
-                target_detail += ", dimezzato dalla deroga sulle ore a contratto"
+                target_detail += (
+                    f", limitato a {ore_target}h dalla deroga sulle ore a contratto"
+                    if self.deroga and self.deroga.max_hours
+                    else ", dimezzato dalla deroga sulle ore a contratto"
+                )
 
             # Sum hours assigned this week
             slots_for_asg = [
