@@ -11,3 +11,8 @@ Documenti/
 # Exported timetables
 orario_*.pdf
 orario_*.xlsx
+
+# Production secrets and DB dumps (see deploy/) - never commit real school data
+.env.production
+deploy/backups/
+deploy/*.sql.gz

@@ -12,4 +12,10 @@ export default defineConfig({
     // nitro/vite builds from this
     server: { entry: "server" },
   },
+  // We self-host on a plain Docker/VM (see /deploy), not Cloudflare Workers,
+  // so override the default "cloudflare-module" preset with a plain Node
+  // HTTP server nitro can run standalone (`node .output/server/index.mjs`).
+  nitro: {
+    preset: "node-server",
+  },
 });

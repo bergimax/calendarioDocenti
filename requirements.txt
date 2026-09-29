@@ -1,6 +1,6 @@
 fastapi>=0.104
 uvicorn[standard]>=0.24
-sqlalchemy>=2.0
+sqlalchemy>=2.0,<2.1  # 2.1 switched the default postgresql:// dialect from psycopg2 to psycopg (v3), which isn't installed here
 psycopg2-binary>=2.9
 pydantic>=2.5
 pydantic-settings>=2.1

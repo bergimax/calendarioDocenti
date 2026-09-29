@@ -1,0 +1,14 @@
+{$DOMAIN} {
+	# Real API routes (app/main.py) plus FastAPI's own docs/schema - the
+	# rest (/) goes to the TanStack Start frontend, which serves everything
+	# else including client-side routes.
+	@backend path /api/* /health /docs /openapi.json /redoc
+
+	handle @backend {
+		reverse_proxy backend:8000
+	}
+
+	handle {
+		reverse_proxy frontend:3000
+	}
+}

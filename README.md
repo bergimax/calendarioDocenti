@@ -65,6 +65,12 @@ npm run dev
 
 Il client legge l'URL del backend da `VITE_API_BASE_URL` (vedi `frontend/src/lib/api.ts`).
 
+## Deploy in produzione
+
+Vedi [`deploy/README.md`](deploy/README.md): Docker Compose (backend + frontend +
+Postgres + Caddy con HTTPS automatico), pensato per una VM gratuita (Oracle Cloud
+Always Free), passo-passo dalla creazione della VM alla messa online.
+
 ## Stato del progetto
 
 - **Backend**: implementati setup/onboarding (parsing CSV **e PDF** + validazione +
