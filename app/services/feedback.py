@@ -1,5 +1,5 @@
 """Admin ratings of generated schedules (collection only, see OrarioFeedback)."""
-from datetime import date
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
@@ -101,6 +101,10 @@ class FeedbackService:
             quality_level=orario.quality_level,
             n_conflitti_soft=orario.n_conflitti_soft,
             stato=orario.stato,
+            # set here (microsecond precision), not by the DB's now(): with
+            # second-resolution timestamps two ratings in the same second
+            # would tie and "newest first" would fall back to the random id.
+            created_at=datetime.utcnow(),
         )
         self.db.add(fb)
         self.db.add(AuditLog(
