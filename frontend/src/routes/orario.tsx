@@ -14,7 +14,15 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { API_BASE_URL, api, apiErrorMessage } from "@/lib/api";
-import type { ChatMessage, Conflict, Schedule, SlotLezione, Teacher, Week } from "@/lib/types";
+import type {
+  ChatMessage,
+  Conflict,
+  Schedule,
+  ScheduleFeedbackData,
+  SlotLezione,
+  Teacher,
+  Week,
+} from "@/lib/types";
 
 // Column order for the weekly grid: group by corso (info, ele, este, pan,
 // itc - school's own requested order), then by anno within each corso.
@@ -38,16 +46,19 @@ function sortClassi<T extends { nome: string }>(classi: T[]): T[] {
   });
 }
 
+// Chat copilot is out of service for now: flip to true to show it again.
+const COPILOT_ENABLED = false;
+
 export const Route = createFileRoute("/orario")({
   head: () => ({
     meta: [
-      { title: "Orario settimanale · Generazione e copilota IA" },
+      { title: "Orario settimanale · Generazione e conflitti" },
       {
         name: "description",
         content:
-          "Tabellone classi × ore, punteggio di qualità, copilota IA, deroghe rapide, approvazione ed esportazione PDF.",
+          "Tabellone classi × ore, punteggio di qualità, deroghe rapide, approvazione ed esportazione PDF.",
       },
-      { property: "og:title", content: "Orario settimanale · Generazione e copilota IA" },
+      { property: "og:title", content: "Orario settimanale · Generazione e conflitti" },
       {
         property: "og:description",
         content: "Genera, correggi e approva l'orario settimanale della scuola.",
@@ -889,7 +900,7 @@ function SidePanel({
     <>
       <div className="flex items-center gap-2 border-b border-edge px-4 py-3">
         <span className="size-2 rounded-full bg-brand" />
-        <span className="font-display text-sm font-semibold">Copilota Orario</span>
+        <span className="font-display text-sm font-semibold">Pannello orario</span>
       </div>
 
       {selectedCell ? (
@@ -964,7 +975,11 @@ function SidePanel({
         </div>
       </div>
 
-      <ChatPanel week={week} schedule={schedule} onScheduleUpdate={onScheduleUpdate} />
+      <FeedbackPanel week={week} schedule={schedule} />
+
+      {COPILOT_ENABLED ? (
+        <ChatPanel week={week} schedule={schedule} onScheduleUpdate={onScheduleUpdate} />
+      ) : null}
     </>
   );
 }
@@ -1264,6 +1279,129 @@ function ModifySlotPanel({
       <Button variant="primary" className="w-full" onClick={submit} disabled={busy}>
         {busy ? "Ricalcolo…" : "Salva e ricalcola"}
       </Button>
+    </div>
+  );
+}
+
+// Admin rating of the generated schedule (1-5) plus the reasons it went
+// wrong. Only collected for now (append-only, see OrarioFeedback on the
+// backend); nothing feeds back into the solver yet.
+function FeedbackPanel({ week, schedule }: { week: string; schedule: Schedule | null }) {
+  const [voto, setVoto] = useState(0);
+  const [motivi, setMotivi] = useState<string[]>([]);
+  const [nota, setNota] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+
+  const feedback = useQuery({
+    queryKey: ["feedback", week, schedule?.quality_score ?? null],
+    queryFn: () => api<ScheduleFeedbackData>(`/api/schedule/${week}/feedback`),
+    enabled: Boolean(week && schedule),
+    retry: false,
+  });
+
+  if (!schedule) return null;
+
+  const current = feedback.data?.current ?? null;
+  const labels = new Map((feedback.data?.motivi_disponibili ?? []).map((m) => [m.code, m.label]));
+  // The rating snapshots the score it was given to: a different score now
+  // means the week was regenerated/edited since.
+  const outdated = current !== null && current.quality_score !== schedule.quality_score;
+
+  async function save() {
+    if (!voto) return;
+    setSaving(true);
+    setMessage(null);
+    try {
+      await api(`/api/schedule/${week}/feedback`, {
+        method: "POST",
+        body: { voto, motivi, nota: nota.trim() || null },
+      });
+      setVoto(0);
+      setMotivi([]);
+      setNota("");
+      setMessage("Valutazione salvata.");
+      await feedback.refetch();
+    } catch (err) {
+      setMessage(apiErrorMessage(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="border-t border-edge p-4 text-xs">
+      <div className="font-display text-sm font-semibold">Valuta questo orario</div>
+
+      {current ? (
+        <p className="mt-1 text-[11px] text-muted-foreground">
+          Ultimo voto: {"★".repeat(current.voto)}
+          {"☆".repeat(5 - current.voto)}
+          {current.motivi.length
+            ? ` · ${current.motivi.map((m) => labels.get(m) ?? m).join(", ")}`
+            : ""}
+          {outdated ? " (riferito a una versione precedente dell'orario)" : ""}
+        </p>
+      ) : null}
+
+      <div className="mt-2 flex gap-1" role="radiogroup" aria-label="Voto">
+        {[1, 2, 3, 4, 5].map((n) => (
+          <button
+            key={n}
+            type="button"
+            role="radio"
+            aria-checked={voto === n}
+            aria-label={`${n} su 5`}
+            onClick={() => setVoto(n)}
+            className={`text-xl leading-none ${n <= voto ? "text-warn" : "text-muted-foreground/40"}`}
+          >
+            ★
+          </button>
+        ))}
+      </div>
+
+      {voto > 0 ? (
+        <>
+          <p className="mt-3 text-[11px] text-muted-foreground">
+            {voto <= 3 ? "Cosa non va?" : "Qualcosa da migliorare?"} (facoltativo)
+          </p>
+          <div className="mt-1.5 flex flex-wrap gap-1.5">
+            {(feedback.data?.motivi_disponibili ?? []).map((m) => {
+              const on = motivi.includes(m.code);
+              return (
+                <button
+                  key={m.code}
+                  type="button"
+                  aria-pressed={on}
+                  onClick={() =>
+                    setMotivi((cur) => (on ? cur.filter((c) => c !== m.code) : [...cur, m.code]))
+                  }
+                  className={`rounded-full px-2.5 py-1 text-[11px] ring-1 ${
+                    on
+                      ? "bg-brand text-primary-foreground ring-brand"
+                      : "bg-background text-foreground/80 ring-edge"
+                  }`}
+                >
+                  {m.label}
+                </button>
+              );
+            })}
+          </div>
+          <textarea
+            value={nota}
+            onChange={(e) => setNota(e.target.value)}
+            maxLength={2000}
+            rows={2}
+            placeholder="Note (facoltative)…"
+            className="mt-2 w-full resize-none rounded-xl bg-background px-3 py-2 text-xs outline-none ring-1 ring-edge placeholder:text-muted-foreground"
+          />
+          <Button variant="primary" className="mt-2" onClick={() => void save()} disabled={saving}>
+            {saving ? "Salvo…" : "Salva valutazione"}
+          </Button>
+        </>
+      ) : null}
+
+      {message ? <p className="mt-2 text-[11px] text-muted-foreground">{message}</p> : null}
     </div>
   );
 }

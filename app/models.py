@@ -293,6 +293,30 @@ class ConflittoGestito(Base):
     created_at = Column(DateTime, server_default=func.now())
 
 
+class OrarioFeedback(Base):
+    """
+    An admin's rating of a generated weekly schedule (1-5 stars), with the
+    reasons it went wrong. Append-only: a week that is regenerated and rated
+    again keeps its earlier ratings, each with a snapshot of the score/level
+    the solver had computed at that moment, so later analysis can tell which
+    solution was actually being rated. `motivi` holds codes from
+    app.services.feedback.MOTIVI (each maps to a solver soft constraint).
+    """
+    __tablename__ = "orario_feedback"
+
+    id = Column(String, primary_key=True, default=lambda: str(__import__('uuid').uuid4()))
+    orario_settimanale_id = Column(String, ForeignKey("orario_settimanale.id"), nullable=False, index=True)
+    admin_id = Column(String, nullable=True)
+    voto = Column(Integer, nullable=False)  # 1-5
+    motivi = Column(JSON, nullable=False, default=list)
+    nota = Column(Text, nullable=True)
+    quality_score = Column(Float, nullable=True)
+    quality_level = Column(String(1), nullable=True)
+    n_conflitti_soft = Column(Integer, nullable=True)
+    stato = Column(String(20), nullable=True)  # BOZZA | APPROVATO when rated
+    created_at = Column(DateTime, server_default=func.now())
+
+
 class AuditLog(Base):
     """Audit log for all actions."""
     __tablename__ = "audit_log"

@@ -86,7 +86,7 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       { property: "og:title", content: "Orario · Gestione orari scolastici" },
       {
         property: "og:description",
-        content: "Setup, disponibilità docenti, generazione orario e copilota IA.",
+        content: "Setup, disponibilità docenti, generazione orario.",
       },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },

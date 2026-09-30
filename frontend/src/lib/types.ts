@@ -171,3 +171,22 @@ export interface ChatMessage {
   streaming?: boolean;
   actions?: { label: string; action_id: string }[];
 }
+
+export interface ScheduleFeedback {
+  id: string;
+  voto: number;
+  motivi: string[];
+  nota: string | null;
+  quality_score: number | null;
+  quality_level: string | null;
+  n_conflitti_soft: number | null;
+  stato: "BOZZA" | "APPROVATO" | null;
+  created_at: string | null;
+}
+
+export interface ScheduleFeedbackData {
+  motivi_disponibili: { code: string; label: string }[];
+  current: ScheduleFeedback | null;
+  history: ScheduleFeedback[];
+  schedule: { quality_score: number | null; quality_level: string | null; stato: string | null };
+}

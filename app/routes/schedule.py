@@ -5,7 +5,9 @@ from typing import Dict, Any
 from app.database import get_db
 from app.security import get_current_admin
 from app.services.schedule import ScheduleService
-from app.schemas import ScheduleGenerateRequest, ScheduleGenerateResponse, ModifySlotRequest, QuickActionRequest, ApproveConflictRequest, RejectConflictRequest, AssignSlotRequest
+from app.services.feedback import FeedbackService, UnknownMotivo
+from app.models import Admin
+from app.schemas import ScheduleGenerateRequest, ScheduleGenerateResponse, ModifySlotRequest, QuickActionRequest, ApproveConflictRequest, RejectConflictRequest, AssignSlotRequest, ScheduleFeedbackRequest
 import logging
 
 logger = logging.getLogger(__name__)
@@ -367,3 +369,36 @@ def download_excel(
     except Exception as e:
         logger.error(f"Error rendering Excel: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.get("/schedule/{week_start}/feedback")
+def get_schedule_feedback(
+    week_start: date,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Ratings the admin gave to this week's schedule (newest first) and the selectable reasons."""
+    result = FeedbackService(db).get(_get_current_school_id(), week_start)
+    if result is None:
+        raise HTTPException(status_code=404, detail="No schedule found for this week")
+    return result
+
+
+@router.post("/schedule/{week_start}/feedback")
+def add_schedule_feedback(
+    week_start: date,
+    request: ScheduleFeedbackRequest,
+    db: Session = Depends(get_db),
+    admin: Admin = Depends(get_current_admin),
+) -> Dict[str, Any]:
+    """Rate the week's schedule (1-5) with the reasons it went wrong. Append-only."""
+    try:
+        saved = FeedbackService(db).add(
+            _get_current_school_id(), week_start,
+            voto=request.voto, motivi=request.motivi, nota=request.nota,
+            admin_id=admin.id,
+        )
+    except UnknownMotivo as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    if saved is None:
+        raise HTTPException(status_code=404, detail="No schedule found for this week")
+    return saved

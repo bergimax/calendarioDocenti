@@ -349,3 +349,10 @@ class LoginResponse(BaseModel):
     status: str
     token: str
     email: str
+
+
+class ScheduleFeedbackRequest(BaseModel):
+    """Admin rating of a generated schedule (1 = unusable, 5 = perfect)."""
+    voto: int = Field(..., ge=1, le=5)
+    motivi: List[str] = Field(default_factory=list)
+    nota: Optional[str] = Field(None, max_length=2000)

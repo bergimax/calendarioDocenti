@@ -382,3 +382,45 @@ def test_quick_action_override_availability_unlocks_contract_teacher(client, sch
     body = r.json()
     assert body["status"] == "applied"
     assert any(s["docente_id"] == beta_id for s in body["slots"])
+
+
+def test_feedback_requires_existing_schedule(client, school_setup):
+    week = school_setup["week_start"]
+    assert client.get(f"/api/schedule/{week}/feedback").status_code == 404
+    r = client.post(f"/api/schedule/{week}/feedback", json={"voto": 3})
+    assert r.status_code == 404
+
+
+def test_feedback_is_stored_with_score_snapshot_and_history(client, school_setup):
+    week = school_setup["week_start"]
+    client.post("/api/schedule/generate", json={"week_start": week})
+
+    empty = client.get(f"/api/schedule/{week}/feedback").json()
+    assert empty["current"] is None and empty["history"] == []
+    codes = {m["code"] for m in empty["motivi_disponibili"]}
+    assert {"contractor_gap", "single_classe_day", "altro"} <= codes
+
+    r = client.post(
+        f"/api/schedule/{week}/feedback",
+        json={"voto": 2, "motivi": ["contractor_gap", "contractor_gap", "altro"], "nota": "  troppi buchi  "},
+    )
+    assert r.status_code == 200, r.text
+    saved = r.json()
+    assert saved["voto"] == 2
+    assert saved["motivi"] == ["contractor_gap", "altro"]  # deduped
+    assert saved["nota"] == "troppi buchi"
+    assert saved["quality_score"] is not None and saved["stato"] == "BOZZA"
+
+    client.post(f"/api/schedule/{week}/feedback", json={"voto": 4})
+    got = client.get(f"/api/schedule/{week}/feedback").json()
+    assert len(got["history"]) == 2  # append-only, earlier rating kept
+    assert got["current"]["voto"] == 4
+
+
+def test_feedback_validation(client, school_setup):
+    week = school_setup["week_start"]
+    client.post("/api/schedule/generate", json={"week_start": week})
+    for voto in (0, 6):
+        assert client.post(f"/api/schedule/{week}/feedback", json={"voto": voto}).status_code == 422
+    r = client.post(f"/api/schedule/{week}/feedback", json={"voto": 3, "motivi": ["inventato"]})
+    assert r.status_code == 422

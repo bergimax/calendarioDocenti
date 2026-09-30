@@ -30,7 +30,7 @@ const CARDS = [
   {
     to: "/orario",
     title: "Genera orario",
-    desc: "Solver, copilota IA, deroghe, approvazione ed esportazione PDF.",
+    desc: "Solver, deroghe, approvazione ed esportazione PDF.",
   },
   {
     to: "/dati",
