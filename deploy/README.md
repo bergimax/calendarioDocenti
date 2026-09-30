@@ -210,6 +210,53 @@ deploy/backup-db.sh
 ```
 Tiene gli ultimi 30 backup in `deploy/backups/` (fuori da git).
 
+Sulla VM di produzione il cron è **già installato** (`crontab -l` come utente
+`ubuntu`): gira ogni notte alle 03:00 UTC (04:00/05:00 in Italia) e scrive
+l'output in `deploy/backup.log`. Note:
+- I backup stanno sulla **stessa VM**: proteggono da errori (restore
+  sbagliato, cancellazioni), non dalla perdita della VM o del disco. Per una
+  copia fuori macchina serve un `scp` periodico o l'Object Storage di Oracle.
+- Se il backup fallisce non arriva nessun avviso, l'errore finisce solo nel
+  log: ogni tanto controlla che `ls -l deploy/backups` mostri un file nuovo
+  al giorno.
+- Ripristino: `deploy/restore-db.sh deploy/backups/<file>.sql.gz`.
+
+**Backup settimanale fuori dalla VM (Oracle Object Storage, Always Free)**
+
+Una copia a settimana finisce in un bucket privato (20GB gratuiti, ne servono
+pochi MB). La VM si autentica da sola ("instance principal"): nessuna chiave
+o password da salvare. Configurazione una tantum, dalla console Oracle
+(regione della VM):
+
+1. *Storage → Object Storage → Buckets → Create Bucket*: nome
+   `calendario-backups`, tier **Standard**, lascia **privato**. Annota il
+   **Namespace** mostrato nella pagina del bucket.
+2. *Identity → Domains → Default → Dynamic groups → Create*: nome
+   `calendario-vm`, regola `instance.id = '<OCID dell'istanza>'` (l'OCID è
+   nella pagina dell'istanza, oppure dal metadata della VM:
+   `curl -s -H "Authorization: Bearer Oracle" http://169.254.169.254/opc/v2/instance/`).
+3. *Identity → Policies → Create Policy* (compartment root), con queste
+   righe (se il gruppo sta nel dominio Default scrivi `'Default'/calendario-vm`):
+   ```
+   Allow dynamic-group calendario-vm to manage objects in tenancy where target.bucket.name='calendario-backups'
+   Allow dynamic-group calendario-vm to read buckets in tenancy where target.bucket.name='calendario-backups'
+   ```
+4. Sulla VM, in `.env.production` aggiungi (non sono segreti):
+   ```
+   OCI_BACKUP_BUCKET=calendario-backups
+   OCI_NAMESPACE=<il namespace annotato>
+   OCI_BACKUP_KEEP=8
+   ```
+5. Prova: `deploy/backup-offsite.sh` (deve stampare `Uploaded weekly/...`).
+   Poi il cron: `30 3 * * 0 cd /home/ubuntu/calendarioDocenti && deploy/backup-offsite.sh >> deploy/backup-offsite.log 2>&1`
+   (domenica 03:30 UTC). Tiene le ultime 8 copie e cancella le più vecchie.
+
+L'OCI CLI sta in un venv dedicato: `sudo apt-get install -y python3-venv &&
+python3 -m venv ~/oci-cli && ~/oci-cli/bin/pip install oci-cli`.
+Ripristino da una copia esterna: scaricala con
+`~/oci-cli/bin/oci os object get --auth instance_principal -ns <ns> -bn calendario-backups --name weekly/<file> --file <file>`
+e poi `deploy/restore-db.sh <file>`.
+
 **Log**:
 ```bash
 docker compose --env-file .env.production logs -f backend
