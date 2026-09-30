@@ -48,8 +48,16 @@ def fresh_database():
 def client():
     from fastapi.testclient import TestClient
     from app.main import app
+    from app.models import Admin
+    from app.security import get_current_admin
 
-    return TestClient(app)
+    # Every /api router requires an admin session (app/security.py); these
+    # tests exercise the routes, not the login, so bypass it.
+    app.dependency_overrides[get_current_admin] = lambda: Admin(id="admin_test", email="test@example.com")
+    try:
+        yield TestClient(app)
+    finally:
+        app.dependency_overrides.pop(get_current_admin, None)
 
 
 @pytest.fixture
