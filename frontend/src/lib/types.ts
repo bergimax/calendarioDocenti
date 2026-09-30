@@ -190,3 +190,24 @@ export interface ScheduleFeedbackData {
   history: ScheduleFeedback[];
   schedule: { quality_score: number | null; quality_level: string | null; stato: string | null };
 }
+
+export interface SoftWeightsState {
+  weights: { kind: string; label: string; default: number; current: number }[];
+  proposals: {
+    kind: string;
+    label: string;
+    motivo: string;
+    current: number;
+    proposed: number;
+    n_feedback: number;
+    feedback_ids: string[];
+  }[];
+  history: {
+    kind: string;
+    label: string;
+    old_weight: number;
+    new_weight: number;
+    reset: boolean;
+    created_at: string | null;
+  }[];
+}

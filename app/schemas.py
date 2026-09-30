@@ -356,3 +356,13 @@ class ScheduleFeedbackRequest(BaseModel):
     voto: int = Field(..., ge=1, le=5)
     motivi: List[str] = Field(default_factory=list)
     nota: Optional[str] = Field(None, max_length=2000)
+
+
+class ApplyWeightsRequest(BaseModel):
+    """Accept the pending weight proposals for these soft-constraint kinds (all if omitted)."""
+    kinds: Optional[List[str]] = None
+
+
+class ResetWeightsRequest(BaseModel):
+    """Put one soft constraint (or all, if omitted) back to its default weight."""
+    kind: Optional[str] = None

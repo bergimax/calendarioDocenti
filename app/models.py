@@ -317,6 +317,27 @@ class OrarioFeedback(Base):
     created_at = Column(DateTime, server_default=func.now())
 
 
+class SoftWeightAdjustment(Base):
+    """
+    One change to the weight of a tunable soft constraint (see
+    app.domain.soft_weights). Append-only: the active weight of a kind is the
+    `new_weight` of its newest row (or the default if it has none), so this
+    table is both the current configuration and its full history, and a
+    revert is just another row back to `old_weight`/the default.
+    `evidenza` records why: the reason code and the ids of the ratings behind
+    an applied proposal, or {"reset": true}.
+    """
+    __tablename__ = "soft_weight_adjustment"
+
+    id = Column(String, primary_key=True, default=lambda: str(__import__('uuid').uuid4()))
+    kind = Column(String(60), nullable=False, index=True)
+    old_weight = Column(Integer, nullable=False)
+    new_weight = Column(Integer, nullable=False)
+    evidenza = Column(JSON, nullable=True)
+    admin_id = Column(String, nullable=True)
+    created_at = Column(DateTime, nullable=False)
+
+
 class AuditLog(Base):
     """Audit log for all actions."""
     __tablename__ = "audit_log"

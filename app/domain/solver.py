@@ -5,6 +5,8 @@ from enum import Enum
 from ortools.sat.python import cp_model
 import logging
 
+from app.domain.soft_weights import resolve_soft_weights
+
 logger = logging.getLogger(__name__)
 
 GIORNI_NOMI_IT = {
@@ -161,6 +163,7 @@ class ScheduleSolver:
         best_effort: bool = False,
         allow_gaps: bool = False,
         forced: bool = False,
+        soft_weights: Optional[Dict[str, int]] = None,
     ):
         """
         Initialize solver with problem context.
@@ -176,6 +179,8 @@ class ScheduleSolver:
           (e.g. "riduci ore Prof Rossi a massimo 10").
         - max_consecutive_teoria: overrides the default 2-hour no-penalty
           cap for _soft_teoria_consecutive school-wide.
+        - soft_weights: overrides for the tunable soft constraints' weights
+          (kind -> weight, see soft_weights.DEFAULT_SOFT_WEIGHTS).
         - best_effort: fallback for a week that is INFEASIBLE with every
           classroom hour required to be filled. Turns that one rule (see
           _constraint_day_capacity) into a heavily penalized goal, so the
@@ -184,6 +189,8 @@ class ScheduleSolver:
         """
         self.context = context
         self.best_effort = best_effort
+        # Weights of the tunable soft constraints (app/domain/soft_weights.py).
+        self._soft_weights = resolve_soft_weights(soft_weights)
         # Only for evaluating an already-decided schedule (solve_fixed): an
         # admin may have freed an hour in the middle of a day, which the
         # "no gaps" rule would otherwise reject. Never set when generating.
@@ -1018,7 +1025,7 @@ class ScheduleSolver:
         (none if the day is entirely free), so summing every start var
         *except* hour 0's gives a 0/1 "didn't start at 8:00" penalty.
         """
-        weight = 100
+        weight = self._soft_weights["classe_late_start"]
         classe_nomi = {asg.classe_id: asg.classe_nome for asg in self.context.assegnazioni}
 
         for (classe_id, giorno), starts_by_ora in self._classe_day_starts.items():
@@ -1050,7 +1057,7 @@ class ScheduleSolver:
         a teacher handoff is its own natural break, the same as a subject
         change would be, so it shouldn't count toward the same run.
         """
-        weight = 10
+        weight = self._soft_weights["teoria_consecutive"]
 
         teoria_asgs = [asg for asg in self.context.assegnazioni if asg.materia_tipo == "TEORIA"]
 
@@ -1196,7 +1203,7 @@ class ScheduleSolver:
 
     def _soft_ore_target_deviation(self) -> None:
         """Soft: Minimize deviation from target hours per assegnazione (weight 15)."""
-        weight = 15
+        weight = self._soft_weights["ore_target_deviation"]
 
         # Calculate weeks remaining until end of the anno formativo
         weeks_in_year = (self.context.anno_fine - self.context.week_start).days // 7
@@ -1266,7 +1273,7 @@ class ScheduleSolver:
 
     def _soft_contractor_gaps(self) -> None:
         """Soft: Minimize gaps (hole hours) for contractors (weight 12)."""
-        weight = 12
+        weight = self._soft_weights["contractor_gap"]
 
         contractor_asgs = [
             asg for asg in self.context.assegnazioni
@@ -1338,7 +1345,7 @@ class ScheduleSolver:
         lone hour or two is trivially "all with one classe" and isn't the
         monotony pattern being discouraged.
         """
-        weight = 10
+        weight = self._soft_weights["single_classe_day"]
         MIN_HOURS = 3
 
         skip_ids = self._paired_assignment_ids_to_dedupe()

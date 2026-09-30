@@ -424,3 +424,92 @@ def test_feedback_validation(client, school_setup):
         assert client.post(f"/api/schedule/{week}/feedback", json={"voto": voto}).status_code == 422
     r = client.post(f"/api/schedule/{week}/feedback", json={"voto": 3, "motivi": ["inventato"]})
     assert r.status_code == 422
+
+
+# --- learning from ratings: soft-weight proposals (app/services/soft_weights.py) ---
+
+def _rate(client, week, voto, motivi):
+    r = client.post(f"/api/schedule/{week}/feedback", json={"voto": voto, "motivi": motivi})
+    assert r.status_code == 200, r.text
+
+
+def _weight(state, kind):
+    return next(w["current"] for w in state["weights"] if w["kind"] == kind)
+
+
+def test_soft_weights_default_state_has_no_proposals(client, school_setup):
+    state = client.get("/api/soft-weights").json()
+    assert state["proposals"] == [] and state["history"] == []
+    assert _weight(state, "teoria_consecutive") == 10
+    assert all(w["current"] == w["default"] for w in state["weights"])
+
+
+def test_proposal_needs_two_low_ratings_on_a_tunable_reason(client, school_setup):
+    week = school_setup["week_start"]
+    client.post("/api/schedule/generate", json={"week_start": week})
+
+    _rate(client, week, 2, ["teoria_consecutive"])
+    assert client.get("/api/soft-weights").json()["proposals"] == []  # only one
+
+    _rate(client, week, 5, ["teoria_consecutive"])  # a good rating is not a complaint
+    _rate(client, week, 2, ["friday_late_start"])  # not tunable by weight
+    _rate(client, week, 2, ["friday_late_start"])
+    assert client.get("/api/soft-weights").json()["proposals"] == []
+
+    _rate(client, week, 1, ["teoria_consecutive"])
+    props = client.get("/api/soft-weights").json()["proposals"]
+    assert [p["kind"] for p in props] == ["teoria_consecutive"]
+    p = props[0]
+    assert p["current"] == 10 and p["n_feedback"] == 2
+    # severity 2 + 3 = 5 points -> +50% (the cap on a single step)
+    assert p["proposed"] == 15
+
+
+def test_applying_a_proposal_changes_the_weight_once_and_can_be_reset(client, school_setup):
+    week = school_setup["week_start"]
+    client.post("/api/schedule/generate", json={"week_start": week})
+    _rate(client, week, 2, ["contractor_gap"])
+    _rate(client, week, 2, ["contractor_gap"])
+
+    state = client.post("/api/soft-weights/apply", json={}).json()
+    assert _weight(state, "contractor_gap") > 12
+    assert state["proposals"] == []  # the same ratings are not counted again
+    assert state["history"][0]["kind"] == "contractor_gap"
+
+    # nothing left to apply
+    again = client.post("/api/soft-weights/apply", json={}).json()
+    assert _weight(again, "contractor_gap") == _weight(state, "contractor_gap")
+
+    reset = client.post("/api/soft-weights/reset", json={"kind": "contractor_gap"}).json()
+    assert _weight(reset, "contractor_gap") == 12
+    assert reset["proposals"] == []  # ratings before the reset are not reused
+    assert len(reset["history"]) == 2 and reset["history"][0]["reset"] is True
+
+
+def test_apply_and_reset_reject_unknown_kinds(client, school_setup):
+    assert client.post("/api/soft-weights/apply", json={"kinds": ["classe_unfilled"]}).status_code == 422
+    assert client.post("/api/soft-weights/reset", json={"kind": "classe_unfilled"}).status_code == 422
+
+
+def test_generation_uses_the_applied_weights(client, school_setup, monkeypatch):
+    import app.domain.solver as solver_module
+
+    seen = []
+    real = solver_module.ScheduleSolver
+
+    class Spy(real):
+        def __init__(self, *a, **kw):
+            seen.append(kw.get("soft_weights"))
+            super().__init__(*a, **kw)
+
+    week = school_setup["week_start"]
+    client.post("/api/schedule/generate", json={"week_start": week})
+    _rate(client, week, 1, ["single_classe_day"])
+    _rate(client, week, 1, ["single_classe_day"])
+    applied = client.post("/api/soft-weights/apply", json={}).json()
+    new_weight = _weight(applied, "single_classe_day")
+    assert new_weight > 10
+
+    monkeypatch.setattr(solver_module, "ScheduleSolver", Spy)
+    client.post(f"/api/schedule/{week}/regenerate", json={"week_start": week})
+    assert seen and all(w["single_classe_day"] == new_weight for w in seen)

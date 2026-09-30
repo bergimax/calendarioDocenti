@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { AppShell } from "@/components/AppShell";
 import { Badge, Button, Field, Select } from "@/components/ui-kit";
@@ -19,6 +19,7 @@ import type {
   Conflict,
   Schedule,
   ScheduleFeedbackData,
+  SoftWeightsState,
   SlotLezione,
   Teacher,
   Week,
@@ -976,6 +977,7 @@ function SidePanel({
       </div>
 
       <FeedbackPanel week={week} schedule={schedule} />
+      <SoftWeightsPanel />
 
       {COPILOT_ENABLED ? (
         <ChatPanel week={week} schedule={schedule} onScheduleUpdate={onScheduleUpdate} />
@@ -1292,6 +1294,7 @@ function FeedbackPanel({ week, schedule }: { week: string; schedule: Schedule | 
   const [nota, setNota] = useState("");
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const queryClient = useQueryClient();
 
   const feedback = useQuery({
     queryKey: ["feedback", week, schedule?.quality_score ?? null],
@@ -1322,6 +1325,7 @@ function FeedbackPanel({ week, schedule }: { week: string; schedule: Schedule | 
       setNota("");
       setMessage("Valutazione salvata.");
       await feedback.refetch();
+      void queryClient.invalidateQueries({ queryKey: ["soft-weights"] });
     } catch (err) {
       setMessage(apiErrorMessage(err));
     } finally {
@@ -1403,6 +1407,94 @@ function FeedbackPanel({ week, schedule }: { week: string; schedule: Schedule | 
 
       {message ? <p className="mt-2 text-[11px] text-muted-foreground">{message}</p> : null}
     </div>
+  );
+}
+
+// Weights of the solver's tunable soft constraints. The ratings above turn
+// into *proposals* here (raise the weight of what the admin keeps
+// complaining about); nothing changes until the admin accepts one, and it
+// only affects the schedules generated afterwards.
+function SoftWeightsPanel() {
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+
+  const state = useQuery({
+    queryKey: ["soft-weights"],
+    queryFn: () => api<SoftWeightsState>("/api/soft-weights"),
+    retry: false,
+  });
+  const data = state.data;
+  if (!data) return null;
+
+  const customized = data.weights.some((w) => w.current !== w.default);
+
+  async function act(path: string, body: object, done: string) {
+    setBusy(true);
+    setMessage(null);
+    try {
+      await api(`/api/soft-weights/${path}`, { method: "POST", body });
+      setMessage(done);
+      await state.refetch();
+    } catch (err) {
+      setMessage(apiErrorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <details className="border-t border-edge p-4 text-xs" open={data.proposals.length > 0 || message !== null}>
+      <summary className="cursor-pointer font-display text-sm font-semibold">
+        Apprendimento dai voti
+        {data.proposals.length ? (
+          <span className="ml-2 rounded-full bg-brand px-2 py-0.5 text-[10px] text-primary-foreground">
+            {data.proposals.length}
+          </span>
+        ) : null}
+      </summary>
+
+      {data.proposals.length === 0 ? (
+        <p className="mt-2 text-[11px] text-muted-foreground">
+          Nessuna proposta: servono almeno 2 voti bassi (fino a 3 stelle) con lo stesso motivo.
+        </p>
+      ) : (
+        <ul className="mt-2 space-y-2">
+          {data.proposals.map((p) => (
+            <li key={p.kind} className="rounded-xl bg-background p-2.5 ring-1 ring-edge">
+              <div className="font-semibold">{p.label}</div>
+              <div className="text-[11px] text-muted-foreground">
+                Peso {p.current} → {p.proposed} · {p.n_feedback} voti bassi
+              </div>
+              <Button
+                variant="primary"
+                className="mt-1.5"
+                disabled={busy}
+                onClick={() => void act("apply", { kinds: [p.kind] }, "Peso aggiornato: vale dalla prossima generazione.")}
+              >
+                Applica
+              </Button>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <div className="mt-3 text-[11px] text-muted-foreground">
+        {data.weights
+          .filter((w) => w.current !== w.default)
+          .map((w) => `${w.label}: ${w.default} → ${w.current}`)
+          .join(" · ") || "Pesi predefiniti."}
+      </div>
+      {customized ? (
+        <Button
+          className="mt-2"
+          disabled={busy}
+          onClick={() => void act("reset", {}, "Pesi ripristinati ai valori predefiniti.")}
+        >
+          Ripristina predefiniti
+        </Button>
+      ) : null}
+      {message ? <p className="mt-2 text-[11px] text-muted-foreground">{message}</p> : null}
+    </details>
   );
 }
 

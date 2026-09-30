@@ -663,9 +663,8 @@ class ScheduleService:
                 for h in range(s["ora_inizio"], s["ora_fine"])
             )
 
-    @staticmethod
     def _solve_with_fallback(
-        context, timeout_seconds: int = 60, fixed_keys=None, **solver_kwargs,
+        self, context, timeout_seconds: int = 60, fixed_keys=None, **solver_kwargs,
     ):
         """
         Solve with every classroom hour required to be filled; if that is
@@ -676,6 +675,10 @@ class ScheduleService:
         Returns (solver, status, relaxed).
         """
         from app.domain.solver import ScheduleSolver
+        from app.services.soft_weights import SoftWeightService
+
+        # weights learned from the admin's ratings (defaults until any is applied)
+        solver_kwargs.setdefault("soft_weights", SoftWeightService(self.db).active_weights())
 
         def run(best_effort: bool, forced: bool = False):
             solver = ScheduleSolver(
