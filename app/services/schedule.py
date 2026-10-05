@@ -1214,12 +1214,11 @@ class ScheduleService:
 
     def render_excel(self, scuola_id: str, week_start: date) -> Optional[bytes]:
         """
-        Render the weekly tabellone as an .xlsx workbook, one sheet per
-        giorno - same classi x ore layout and joint-lesson merging as the
-        PDF, but without the PDF's fixed A4-landscape width: with 20+ classi
-        columns the PDF page can't fit them all and cuts columns off,
-        whereas a spreadsheet just scrolls. Returns None if no schedule
-        exists for this week.
+        Render the weekly tabellone as an .xlsx workbook with the same single-
+        sheet structure as the PDF (see _render_tabellone_html and
+        Documenti/es_di_calendario.pdf): title banner, red header, one block
+        per giorno with a vertical day label, docente surname only, per-classe
+        colors. Returns None if no schedule exists for this week.
         """
         schedule = self.repo.get_schedule_by_week(scuola_id, week_start)
         if not schedule:
@@ -1227,7 +1226,7 @@ class ScheduleService:
 
         from io import BytesIO
         from openpyxl import Workbook
-        from openpyxl.styles import Alignment, Font, PatternFill
+        from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
         from openpyxl.utils import get_column_letter
 
         slots = schedule["slots"]
@@ -1238,79 +1237,103 @@ class ScheduleService:
             classi.setdefault(s["classe_id"], s.get("classe_nome") or s["classe_id"])
         for sc in stage_cells_list:
             classi.setdefault(sc["classe_id"], sc.get("classe_nome") or sc["classe_id"])
-        classi_sorted = sorted(classi.items(), key=lambda c: c[1])
-        classe_index = {classe_id: i for i, (classe_id, _) in enumerate(classi_sorted)}
+        classi_sorted = sorted(classi.items(), key=lambda c: self._tab_sort_key(c[1]))
 
         by_cell = {(s["giorno"], s["ora_inizio"], s["classe_id"]): s for s in slots}
         stage_set = {(sc["classe_id"], sc["giorno"]) for sc in stage_cells_list}
 
-        header_fill = PatternFill("solid", fgColor="EEEEEE")
-        teoria_fill = PatternFill("solid", fgColor="EAF2FF")
-        pratica_fill = PatternFill("solid", fgColor="EAFBEA")
-        stage_fill = PatternFill("solid", fgColor="FDF1E0")
-        stage_font = Font(bold=True, color="8A5A00")
-        libera_font = Font(italic=True, color="999999")
-        wrap = Alignment(wrap_text=True, vertical="center")
+        def fill(hex_color: str) -> PatternFill:
+            return PatternFill("solid", fgColor=hex_color.lstrip("#").upper())
+
+        thin = Side(style="thin", color="000000")
+        border = Border(left=thin, right=thin, top=thin, bottom=thin)
+        center = Alignment(horizontal="center", vertical="center")
+        n_cols = len(classi_sorted) + 2
 
         wb = Workbook()
-        wb.remove(wb.active)
+        ws = wb.active
+        ws.title = "Orario"
 
-        for giorno, label in self._GIORNI_LABELS.items():
-            ws = wb.create_sheet(label)
-            ws.freeze_panes = "B2"
-            ws.cell(row=1, column=1, value="Ora").fill = header_fill
-            for j, (_, classe_nome) in enumerate(classi_sorted, start=2):
-                cell = ws.cell(row=1, column=j, value=classe_nome)
-                cell.fill = header_fill
-                cell.font = Font(bold=True)
-                cell.alignment = wrap
-                ws.column_dimensions[get_column_letter(j)].width = 16
+        titolo = self._tab_titolo_settimana(week_start)
+        for r, (text, size) in enumerate(
+            [("Agenzia Formativa don Angelo Tedoldi", 16), (f"Orario scolastico {titolo}", 16)], start=1
+        ):
+            ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=n_cols)
+            c = ws.cell(row=r, column=1, value=text)
+            c.font = Font(bold=True, size=size)
+            c.alignment = center
+            c.fill = fill("#95b3d7")
+            ws.row_dimensions[r].height = 24
 
-            for i, ora in enumerate(self._ORE, start=2):
-                ws.cell(row=i, column=1, value=f"{ora}:00").font = Font(bold=True)
+        header_row = 3
+        for j, label in enumerate(["DATA", "Orario"] + [n for _, n in classi_sorted], start=1):
+            c = ws.cell(row=header_row, column=j, value=label)
+            c.font = Font(bold=True, color="FFFFFF", size=9)
+            c.fill = fill("#c00000")
+            c.alignment = center
+            c.border = border
+        ws.column_dimensions["A"].width = 6
+        ws.column_dimensions["B"].width = 8
+        for j in range(3, n_cols + 1):
+            ws.column_dimensions[get_column_letter(j)].width = 15
+        ws.freeze_panes = ws.cell(row=header_row + 1, column=3)
 
-                cell_slots = {
-                    classe_id: by_cell[(giorno, ora, classe_id)]
-                    for classe_id, _ in classi_sorted
-                    if (giorno, ora, classe_id) in by_cell
-                }
-                group_of = self._group_classi_for_hour(cell_slots)
+        row = header_row + 1
+        for idx, (giorno, label) in enumerate(self._GIORNI_LABELS.items()):
+            # Drop trailing hours nobody has (e.g. a short Friday), like the sheet.
+            ore_con_lezioni = [
+                o for o in self._ORE
+                if any((giorno, o, cid) in by_cell for cid, _ in classi_sorted)
+            ]
+            last = max(ore_con_lezioni, default=self._ORE[-1])
+            ore = [o for o in self._ORE if o <= last]
 
-                skip: set = set()
-                for classe_id, _ in classi_sorted:
-                    if classe_id in skip:
-                        continue
-                    col = classe_index[classe_id] + 2
-                    if (classe_id, giorno) in stage_set:
-                        cell = ws.cell(row=i, column=col, value="STAGE")
-                        cell.fill = stage_fill
-                        cell.font = stage_font
-                        cell.alignment = Alignment(horizontal="center", vertical="center")
-                        continue
-                    slot = cell_slots.get(classe_id)
-                    if not slot:
-                        cell = ws.cell(row=i, column=col, value="Libera")
-                        cell.font = libera_font
-                        continue
+            start = row
+            for ora in ore:
+                c = ws.cell(row=row, column=2, value=f"{ora}-{ora + 1}")
+                c.alignment = center
+                c.border = border
+                c.font = Font(size=8)
+                for j, (cid, nome) in enumerate(classi_sorted, start=3):
+                    if (cid, giorno) in stage_set:
+                        c = ws.cell(row=row, column=j, value="STAGE")
+                        c.fill = fill("#fdf1e0")
+                        c.font = Font(bold=True, color="8A5A00")
+                    else:
+                        slot = by_cell.get((giorno, ora, cid))
+                        if slot:
+                            doc = slot.get("docente_nome") or slot["docente_id"]
+                            c = ws.cell(row=row, column=j, value=doc.split()[0] if doc else "")
+                            c.font = Font(bold=True)
+                            k = self._tab_classe_key(nome)
+                            colore = self._TAB_COLORI.get((k[1], k[0])) if k else None
+                            if colore:
+                                c.fill = fill(colore)
+                        else:
+                            c = ws.cell(row=row, column=j)
+                            c.fill = fill("#d9d9d9")
+                    c.alignment = center
+                    c.border = border
+                row += 1
 
-                    group = group_of[classe_id]
-                    span = 1
-                    if len(group) > 1:
-                        indices = sorted(classe_index[c] for c in group)
-                        contiguous = indices == list(range(indices[0], indices[-1] + 1))
-                        if contiguous:
-                            span = len(group)
-                            skip.update(c for c in group if c != classe_id)
+            ws.merge_cells(start_row=start, start_column=1, end_row=row - 1, end_column=1)
+            c = ws.cell(row=start, column=1, value=label.lower())
+            c.fill = fill("#e46c0a" if idx % 2 == 0 else "#0070c0")
+            c.font = Font(italic=True, color="FFFFFF", size=9)
+            c.alignment = Alignment(horizontal="center", vertical="center", text_rotation=90)
+            for r in range(start, row):
+                ws.cell(row=r, column=1).border = border
 
-                    cell = ws.cell(
-                        row=i, column=col, value=slot.get("docente_nome") or slot["docente_id"]
-                    )
-                    cell.fill = pratica_fill if slot.get("materia_tipo") == "PRATICA" else teoria_fill
-                    cell.alignment = wrap
-                    if span > 1:
-                        ws.merge_cells(start_row=i, start_column=col, end_row=i, end_column=col + span - 1)
+            if idx < len(self._GIORNI_LABELS) - 1:
+                for j in range(1, n_cols + 1):
+                    ws.cell(row=row, column=j).fill = fill("#d9d9d9")
+                ws.row_dimensions[row].height = 6
+                row += 1
 
-            ws.row_dimensions[1].height = 30
+        ws.page_setup.orientation = "landscape"
+        ws.page_setup.fitToWidth = 1
+        ws.page_setup.fitToHeight = 1
+        ws.sheet_properties.pageSetUpPr.fitToPage = True
 
         buf = BytesIO()
         wb.save(buf)
