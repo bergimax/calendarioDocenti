@@ -16,3 +16,17 @@ orario_*.xlsx
 .env.production
 deploy/backups/
 deploy/*.sql.gz
+
+# Never commit local DB copies, dumps, backups or secrets (the repo is public)
+dev.db*
+*.sqlite
+*.sqlite3
+*.db-*
+*.bak
+*.sql
+*.sql.gz
+*.dump
+.env.*
+!.env.example
+*.pem
+*.key
