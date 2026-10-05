@@ -64,6 +64,13 @@ export function AppShell({
               <div className="label-mono">{segreteria ? "Sola lettura" : "School Admin"}</div>
             </div>
           </div>
+          <Link
+            to="/account"
+            className="mt-1 block w-full rounded-lg px-2 py-1.5 text-left text-xs font-medium text-muted-foreground transition-colors hover:bg-accent/60"
+            activeProps={{ className: "bg-accent text-accent-foreground" }}
+          >
+            Cambia password
+          </Link>
           <button
             type="button"
             onClick={() => navigate({ to: "/", replace: true })}

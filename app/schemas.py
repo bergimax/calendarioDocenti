@@ -344,6 +344,12 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class ChangePasswordRequest(BaseModel):
+    """Change the logged-in user's own password."""
+    current_password: str
+    new_password: str
+
+
 class LoginResponse(BaseModel):
     """Admin login response - token is sent back as a Bearer token."""
     status: str

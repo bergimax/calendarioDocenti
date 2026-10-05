@@ -10,6 +10,7 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as AccountRouteImport } from './routes/account'
 import { Route as DatiRouteImport } from './routes/dati'
 import { Route as DisponibilitaRouteImport } from './routes/disponibilita'
 import { Route as MenuRouteImport } from './routes/menu'
@@ -25,6 +26,11 @@ import { Route as DatiDocentiRouteImport } from './routes/dati.docenti'
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AccountRoute = AccountRouteImport.update({
+  id: '/account',
+  path: '/account',
   getParentRoute: () => rootRouteImport,
 } as any)
 const DatiRoute = DatiRouteImport.update({
@@ -85,6 +91,7 @@ const DatiDocentiRoute = DatiDocentiRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/account': typeof AccountRoute
   '/dati': typeof DatiRouteWithChildren
   '/disponibilita': typeof DisponibilitaRoute
   '/menu': typeof MenuRoute
@@ -99,6 +106,7 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/account': typeof AccountRoute
   '/disponibilita': typeof DisponibilitaRoute
   '/menu': typeof MenuRoute
   '/orario': typeof OrarioRoute
@@ -113,6 +121,7 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/account': typeof AccountRoute
   '/dati': typeof DatiRouteWithChildren
   '/disponibilita': typeof DisponibilitaRoute
   '/menu': typeof MenuRoute
@@ -129,6 +138,7 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
+    | '/account'
     | '/dati'
     | '/disponibilita'
     | '/menu'
@@ -143,6 +153,7 @@ export interface FileRouteTypes {
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
+    | '/account'
     | '/disponibilita'
     | '/menu'
     | '/orario'
@@ -156,6 +167,7 @@ export interface FileRouteTypes {
   id:
     | '__root__'
     | '/'
+    | '/account'
     | '/dati'
     | '/disponibilita'
     | '/menu'
@@ -171,6 +183,7 @@ export interface FileRouteTypes {
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  AccountRoute: typeof AccountRoute
   DatiRoute: typeof DatiRouteWithChildren
   DisponibilitaRoute: typeof DisponibilitaRoute
   MenuRoute: typeof MenuRoute
@@ -185,6 +198,13 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/account': {
+      id: '/account'
+      path: '/account'
+      fullPath: '/account'
+      preLoaderRoute: typeof AccountRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/dati': {
@@ -289,6 +309,7 @@ const DatiRouteWithChildren = DatiRoute._addFileChildren(DatiRouteChildren)
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  AccountRoute: AccountRoute,
   DatiRoute: DatiRouteWithChildren,
   DisponibilitaRoute: DisponibilitaRoute,
   MenuRoute: MenuRoute,
