@@ -13,7 +13,7 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
-import { API_BASE_URL, api, apiErrorMessage } from "@/lib/api";
+import { API_BASE_URL, api, apiBlob, apiErrorMessage } from "@/lib/api";
 import type {
   ChatMessage,
   Conflict,
@@ -318,7 +318,8 @@ function SchedulePage() {
   async function exportPdf() {
     try {
       const res = await api<{ pdf_url: string }>(`/api/schedule/${week}/export-pdf`);
-      window.open(`${API_BASE_URL}${res.pdf_url}`, "_blank", "noopener");
+      const blob = await apiBlob(res.pdf_url);
+      window.open(URL.createObjectURL(blob), "_blank");
     } catch (err) {
       setNotice(apiErrorMessage(err));
     }

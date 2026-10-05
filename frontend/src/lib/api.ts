@@ -88,6 +88,21 @@ export async function api<T>(path: string, options: Options = {}): Promise<T> {
   return (await res.json()) as T;
 }
 
+/** GET autenticato di un file binario (es. PDF): window.open non invierebbe il token Bearer. */
+export async function apiBlob(path: string): Promise<Blob> {
+  const token = getAuthToken();
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE_URL}${path}`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+  } catch {
+    throw new ApiError("Impossibile contattare il server.", 0);
+  }
+  if (!res.ok) throw new ApiError(`Errore ${res.status}`, res.status);
+  return res.blob();
+}
+
 export function apiErrorMessage(error: unknown): string {
   if (error instanceof ApiError) {
     return error.status === 0

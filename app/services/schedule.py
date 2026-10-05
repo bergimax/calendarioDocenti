@@ -1,5 +1,5 @@
 from sqlalchemy.orm import Session
-from datetime import date
+from datetime import date, timedelta
 from typing import Dict, Any, List, Optional
 from app.repositories.schedule import ScheduleRepository
 from app.domain.solver import ScheduleSolver
@@ -1354,8 +1354,63 @@ class ScheduleService:
 
         return {classe_id: groups[find(classe_id)] for classe_id in cell_slots}
 
+    # --- Tabellone PDF: layout modeled on Documenti/es_di_calendario.pdf ---
+    _TAB_INDIRIZZI = ["OP. INFORM.", "ELETTRICISTI", "ESTETISTE", "PAN. E PAST", "I.T.C."]
+    _TAB_ROMANI = {"I": 1, "II": 2, "III": 3, "IV": 4, "V": 5}
+    _TAB_MESI = [
+        "Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno", "Luglio",
+        "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre",
+    ]
+    # Fill per (indirizzo, anno) as in the reference sheet; anything else is white.
+    _TAB_COLORI = {
+        ("OP. INFORM.", 1): "#ddd9c4", ("OP. INFORM.", 2): "#f2dcdb", ("OP. INFORM.", 3): "#92d050",
+        ("ELETTRICISTI", 1): "#ddd9c4", ("ELETTRICISTI", 2): "#f2dcdb", ("ELETTRICISTI", 3): "#ff99cc",
+        ("ESTETISTE", 1): "#c5d9f1", ("ESTETISTE", 2): "#fde9d9", ("ESTETISTE", 3): "#ff99cc",
+        ("PAN. E PAST", 1): "#c5d9f1", ("PAN. E PAST", 2): "#fde9d9", ("PAN. E PAST", 3): "#92d050",
+        ("I.T.C.", 1): "#ffff99",
+    }
+
+    @classmethod
+    def _tab_classe_key(cls, nome: str):
+        """(anno, indirizzo) parsed from e.g. 'III PAN. E PAST.'; None if unparseable."""
+        parts = (nome or "").strip().upper().split(" ", 1)
+        if len(parts) == 2 and parts[0] in cls._TAB_ROMANI:
+            rest = parts[1].strip().rstrip(".")
+            for ind in cls._TAB_INDIRIZZI:
+                if rest == ind.rstrip("."):
+                    return cls._TAB_ROMANI[parts[0]], ind
+        return None
+
+    @classmethod
+    def _tab_sort_key(cls, nome: str):
+        k = cls._tab_classe_key(nome)
+        if k is None:
+            return (len(cls._TAB_INDIRIZZI), 0, nome)
+        anno, ind = k
+        return (cls._TAB_INDIRIZZI.index(ind), anno, nome)
+
+    @classmethod
+    def _tab_titolo_settimana(cls, week_start: date) -> str:
+        fine = week_start + timedelta(days=4)
+        if week_start.month == fine.month:
+            return f"dal {week_start.day} al {fine.day} {cls._TAB_MESI[fine.month - 1]}"
+        return (
+            f"dal {week_start.day} {cls._TAB_MESI[week_start.month - 1]} "
+            f"al {fine.day} {cls._TAB_MESI[fine.month - 1]}"
+        )
+
     def _render_tabellone_html(self, schedule: Dict[str, Any]) -> str:
+        """
+        Single A4-landscape page: all five days stacked, one column per classe,
+        one row per hour, docente surname only - same structure as the school's
+        reference sheet. Every cell is the real slot of that giorno/ora/classe,
+        so teachers vary across days exactly as in the schedule.
+        """
         from html import escape
+
+        ws = schedule["week_start"]
+        if isinstance(ws, str):
+            ws = date.fromisoformat(ws)
 
         slots = schedule["slots"]
         stage_cells_list = schedule.get("stage_cells") or []
@@ -1365,106 +1420,99 @@ class ScheduleService:
             classi.setdefault(s["classe_id"], s.get("classe_nome") or s["classe_id"])
         for sc in stage_cells_list:
             classi.setdefault(sc["classe_id"], sc.get("classe_nome") or sc["classe_id"])
-        classi_sorted = sorted(classi.items(), key=lambda c: c[1])
-        classe_index = {classe_id: i for i, (classe_id, _) in enumerate(classi_sorted)}
+        classi_sorted = sorted(classi.items(), key=lambda c: self._tab_sort_key(c[1]))
 
         by_cell = {(s["giorno"], s["ora_inizio"], s["classe_id"]): s for s in slots}
         stage_set = {(sc["classe_id"], sc["giorno"]) for sc in stage_cells_list}
 
-        pages = []
-        for giorno in self._GIORNI_LABELS:
-            rows_html = []
-            for ora in self._ORE:
-                cell_slots = {
-                    classe_id: by_cell[(giorno, ora, classe_id)]
-                    for classe_id, _ in classi_sorted
-                    if (giorno, ora, classe_id) in by_cell
-                }
-                group_of = self._group_classi_for_hour(cell_slots)
+        def colore(nome: str) -> str:
+            k = self._tab_classe_key(nome)
+            if k is None:
+                return "#ffffff"
+            return self._TAB_COLORI.get((k[1], k[0]), "#ffffff")
 
-                skip: set = set()
-                cells = [f'<td class="ora">{ora}:00</td>']
-                for classe_id, classe_nome in classi_sorted:
-                    if classe_id in skip:
-                        continue
-                    if (classe_id, giorno) in stage_set:
+        colors = {cid: colore(nome) for cid, nome in classi_sorted}
+
+        body = []
+        for idx, giorno in enumerate(self._GIORNI_LABELS):
+            # Drop trailing hours nobody has (e.g. a short Friday), like the sheet.
+            ore = [
+                o for o in self._ORE
+                if any((giorno, o, cid) in by_cell for cid, _ in classi_sorted)
+            ]
+            if not ore:
+                ore = list(self._ORE)
+            last = max(
+                (o for o in ore),
+                default=self._ORE[-1],
+            )
+            ore = [o for o in self._ORE if o <= last]
+
+            label_cls = "g-orange" if idx % 2 == 0 else "g-blue"
+            label = self._GIORNI_LABELS[giorno].lower()
+            for i, ora in enumerate(ore):
+                cells = []
+                if i == 0:
+                    cells.append(
+                        f'<td class="giorno {label_cls}" rowspan="{len(ore)}">'
+                        f'<div class="giorno-txt">{escape(label)}</div></td>'
+                    )
+                cells.append(f'<td class="ora">{ora}-{ora + 1}</td>')
+                for cid, _ in classi_sorted:
+                    if (cid, giorno) in stage_set:
                         cells.append('<td class="stage">STAGE</td>')
                         continue
-                    slot = cell_slots.get(classe_id)
+                    slot = by_cell.get((giorno, ora, cid))
                     if not slot:
-                        cells.append('<td class="libera">Libera</td>')
+                        cells.append('<td class="vuota"></td>')
                         continue
+                    nome = slot.get("docente_nome") or slot["docente_id"]
+                    cognome = escape(nome.split()[0]) if nome else ""
+                    cells.append(f'<td style="background:{colors[cid]}">{cognome}</td>')
+                body.append(f"<tr>{''.join(cells)}</tr>")
+            if idx < len(self._GIORNI_LABELS) - 1:
+                body.append(f'<tr class="sep"><td colspan="{len(classi_sorted) + 2}"></td></tr>')
 
-                    group = group_of[classe_id]
-                    colspan = 1
-                    if len(group) > 1:
-                        indices = sorted(classe_index[c] for c in group)
-                        contiguous = indices == list(range(indices[0], indices[-1] + 1))
-                        # Only mergeable if the group forms an unbroken run
-                        # of columns; otherwise fall back to one cell per
-                        # classe rather than risk an invalid colspan.
-                        if contiguous:
-                            colspan = len(group)
-                            skip.update(c for c in group if c != classe_id)
-
-                    tone = "pratica" if slot.get("materia_tipo") == "PRATICA" else "teoria"
-                    docente = escape(slot.get("docente_nome") or slot["docente_id"])
-                    cells.append(
-                        f'<td class="{tone}" colspan="{colspan}">'
-                        f'<span class="docente">{docente}</span>'
-                        f'</td>'
-                    )
-                rows_html.append(f"<tr>{''.join(cells)}</tr>")
-
-            header_cells = "".join(f"<th>{escape(nome)}</th>" for _, nome in classi_sorted)
-            # table-layout:fixed needs explicit column widths (from a
-            # colgroup, since it stops sizing columns from cell content) or
-            # a wide roster - e.g. this school's 17 classi - overflows the
-            # printable A4-landscape width and the rightmost classi are cut
-            # off the page entirely.
-            n_classi = max(len(classi_sorted), 1)
-            ora_pct = min(8, 100 / (n_classi + 1))
-            classe_pct = (100 - ora_pct) / n_classi
-            colgroup = (
-                f'<col style="width:{ora_pct}%">'
-                + f'<col style="width:{classe_pct}%">' * n_classi
-            )
-            pages.append(f"""
-                <div class="day-page">
-                  <h1>Orario settimanale</h1>
-                  <h2>{self._GIORNI_LABELS[giorno]} &middot; settimana dal {escape(str(schedule["week_start"]))}</h2>
-                  <table>
-                    <colgroup>{colgroup}</colgroup>
-                    <thead><tr><th>Ora</th>{header_cells}</tr></thead>
-                    <tbody>{''.join(rows_html)}</tbody>
-                  </table>
-                </div>
-            """)
+        header = "".join(f"<th>{escape(nome)}</th>" for _, nome in classi_sorted)
+        n = max(len(classi_sorted), 1)
+        colgroup = '<col style="width:3.5%"><col style="width:3.5%">' + (
+            f'<col style="width:{93 / n:.3f}%">' * n
+        )
+        titolo = self._tab_titolo_settimana(ws)
 
         return f"""<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
 <style>
-  @page {{ size: A4 landscape; margin: 12mm; }}
-  body {{ font-family: Helvetica, Arial, sans-serif; font-size: 9pt; color: #111; margin: 0; }}
-  h1 {{ font-size: 14pt; margin: 0 0 2mm 0; }}
-  h2 {{ font-size: 11pt; margin: 0 0 4mm 0; color: #444; font-weight: normal; }}
+  @page {{ size: A4 landscape; margin: 8mm; }}
+  body {{ font-family: Calibri, Carlito, Helvetica, Arial, sans-serif; margin: 0; color: #000; }}
+  .banner {{ background: #95b3d7; text-align: center; font-weight: bold; padding: 2mm 0; margin-bottom: 1mm; }}
+  .banner .t1 {{ font-size: 14pt; }}
+  .banner .t2 {{ font-size: 14pt; }}
   table {{ width: 100%; table-layout: fixed; border-collapse: collapse; }}
-  th, td {{
-    border: 0.5pt solid #999; padding: 1mm; text-align: left; vertical-align: top;
-    overflow-wrap: break-word; word-break: break-word;
-  }}
-  th {{ background: #eee; font-size: 6.5pt; text-transform: uppercase; }}
-  td.ora {{ font-weight: bold; white-space: nowrap; }}
-  td.teoria {{ background: #eaf2ff; }}
-  td.pratica {{ background: #eafbea; }}
-  td.libera {{ color: #999; font-style: italic; }}
-  td.stage {{ background: #fdf1e0; color: #8a5a00; font-weight: bold; text-align: center; }}
-  .docente {{ display: block; font-size: 7pt; color: #111; }}
-  .day-page {{ page-break-after: always; }}
-  .day-page:last-child {{ page-break-after: auto; }}
+  th {{ background: #c00000; color: #fff; font-size: 4.8pt; font-weight: bold;
+        border: 0.6pt solid #000; padding: 0.4mm 0; text-align: center; white-space: nowrap; }}
+  td {{ border: 0.5pt solid #000; font-size: 5.8pt; font-weight: bold; text-align: center;
+        padding: 0.35mm 0; overflow: hidden; white-space: nowrap; }}
+  td.ora {{ font-weight: normal; font-size: 4.6pt; }}
+  td.vuota {{ background: #d9d9d9; }}
+  td.stage {{ background: #fdf1e0; color: #8a5a00; }}
+  td.giorno {{ width: 3.5%; padding: 0; vertical-align: middle; }}
+  td.g-orange {{ background: #e46c0a; }}
+  td.g-blue {{ background: #0070c0; }}
+  .giorno-txt {{ color: #fff; font-size: 6pt; font-style: italic; white-space: nowrap;
+                 transform: rotate(-90deg); display: inline-block; }}
+  tr.sep td {{ background: #d9d9d9; border: none; height: 1.6mm; padding: 0; }}
 </style>
 </head>
-<body>{''.join(pages)}</body>
+<body>
+  <div class="banner"><div class="t1">Agenzia Formativa don Angelo Tedoldi</div>
+  <div class="t2">Orario scolastico {escape(titolo)}</div></div>
+  <table>
+    <colgroup>{colgroup}</colgroup>
+    <thead><tr><th>DATA</th><th>Orario</th>{header}</tr></thead>
+    <tbody>{''.join(body)}</tbody>
+  </table>
+</body>
 </html>"""

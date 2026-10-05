@@ -128,6 +128,7 @@ class ScheduleRepository:
         ).all()
 
         calendario = []
+        stage_resolver = self._stage_classe_resolver(scuola_id)
         for cal in calendario_list:
             # Convert date to giorno (0-4)
             giorno = (cal.data - week_start).days
@@ -137,7 +138,7 @@ class ScheduleRepository:
                     giorno=giorno,
                     ore_max_giornata=cal.ore_max_giornata,
                     gruppo=cal.gruppo,
-                    flag_stage_classe_id=cal.flag_stage_classe_id,
+                    flag_stage_classe_id=stage_resolver(cal.flag_stage_classe_id),
                     flag_stage_gruppo=cal.flag_stage_gruppo,
                     flag_chiusura=cal.flag_chiusura,
                     ora_inizio_min=cal.ora_inizio_min,
@@ -273,6 +274,24 @@ class ScheduleRepository:
 
     _GIORNI_NOMI = ["LUNEDI", "MARTEDI", "MERCOLEDI", "GIOVEDI", "VENERDI"]
 
+    def _stage_classe_resolver(self, scuola_id: str):
+        """
+        Callable mapping a stored flag_stage_classe_id to a real classe id.
+        The admin may have typed the classe *name* (e.g. "I OP. INFORM.")
+        instead of its UUID; accept either, case-insensitively, so a stage
+        entry is never silently ignored. Unknown values are returned as-is.
+        """
+        classi = self.db.query(Classe).filter_by(scuola_id=scuola_id).all()
+        ids = {c.id for c in classi}
+        by_nome = {c.nome.strip().lower(): c.id for c in classi if c.nome}
+
+        def resolve(value):
+            if not value or value in ids:
+                return value
+            return by_nome.get(value.strip().lower(), value)
+
+        return resolve
+
     def _stage_cells_for_week(self, scuola_id: str, week_start: date) -> List[dict]:
         """
         {classe_id, classe_nome, giorno} entries on stage this week - a
@@ -295,6 +314,7 @@ class ScheduleRepository:
         classi = self.db.query(Classe).filter_by(scuola_id=scuola_id).all()
         classi_gruppo = {c.id: c.gruppo for c in classi}
         classi_nome = {c.id: c.nome for c in classi}
+        stage_resolver = self._stage_classe_resolver(scuola_id)
 
         cells = set()
         for cal in calendario:
@@ -303,8 +323,9 @@ class ScheduleRepository:
                 continue
             giorno_nome = self._GIORNI_NOMI[giorno_idx]
 
-            if cal.flag_stage_classe_id:
-                cells.add((cal.flag_stage_classe_id, giorno_nome))
+            stage_id = stage_resolver(cal.flag_stage_classe_id)
+            if stage_id:
+                cells.add((stage_id, giorno_nome))
             elif cal.flag_stage_gruppo and cal.gruppo:
                 for classe_id, gruppo in classi_gruppo.items():
                     if gruppo == cal.gruppo:

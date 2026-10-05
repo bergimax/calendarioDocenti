@@ -1,13 +1,16 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { CrudTable } from "@/components/CrudTable";
+import { useQuery } from "@tanstack/react-query";
 import { Field, Select } from "@/components/ui-kit";
-import type { CalendarEntry } from "@/lib/types";
+import { api } from "@/lib/api";
+import type { CalendarEntry, SchoolClass } from "@/lib/types";
 
 export const Route = createFileRoute("/dati/calendario")({
   component: CalendarPage,
 });
 
 function CalendarPage() {
+  const classes = useQuery({ queryKey: ["/api/classes"], queryFn: () => api<SchoolClass[]>("/api/classes") });
   return (
     <CrudTable<CalendarEntry & Record<string, unknown>>
       title="Calendario annuale"
@@ -81,11 +84,18 @@ function CalendarPage() {
             <option value="false">No</option>
             <option value="true">Sì (richiede Gruppo impostato sopra)</option>
           </Select>
-          <Field
-            label="Singola classe in stage (ID, alternativa a Gruppo)"
+          <Select
+            label="Singola classe in stage (alternativa a Gruppo)"
             value={value["flag_stage_classe_id"] ?? ""}
             onChange={(e) => set("flag_stage_classe_id", e.target.value)}
-          />
+          >
+            <option value="">Nessuna</option>
+            {(classes.data ?? []).map((c) => (
+              <option key={c.classe_id} value={c.classe_id}>
+                {c.nome}
+              </option>
+            ))}
+          </Select>
         </>
       )}
     />
