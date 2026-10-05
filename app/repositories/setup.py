@@ -114,7 +114,8 @@ class SetupRepository:
                 gruppo=data.get("gruppo"),
                 ore_max_giornata=data.get("ore_max_giornata", 6),
                 flag_chiusura=data.get("flag_chiusura", False),
-                flag_stage_classe_id=data.get("flag_stage_classe_id"),
+                flag_stage_classe_id=data.get("flag_stage_classe_id") or data.get("stage_classe_id"),
+                flag_stage_gruppo=bool(data.get("flag_stage_gruppo", False)),
             )
             self.db.add(cal)
 

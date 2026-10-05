@@ -1297,8 +1297,8 @@ class ScheduleService:
                 for j, (cid, nome) in enumerate(classi_sorted, start=3):
                     if (cid, giorno) in stage_set:
                         c = ws.cell(row=row, column=j, value="STAGE")
-                        c.fill = fill("#fdf1e0")
-                        c.font = Font(bold=True, color="8A5A00")
+                        c.fill = fill("#ffff00")
+                        c.font = Font(bold=True, color="000000")
                     else:
                         slot = by_cell.get((giorno, ora, cid))
                         if slot:
@@ -1520,7 +1520,7 @@ class ScheduleService:
         padding: 0.35mm 0; overflow: hidden; white-space: nowrap; }}
   td.ora {{ font-weight: normal; font-size: 4.6pt; }}
   td.vuota {{ background: #d9d9d9; }}
-  td.stage {{ background: #fdf1e0; color: #8a5a00; }}
+  td.stage {{ background: #ffff00; color: #000; }}
   td.giorno {{ width: 3.5%; padding: 0; vertical-align: middle; }}
   td.g-orange {{ background: #e46c0a; }}
   td.g-blue {{ background: #0070c0; }}

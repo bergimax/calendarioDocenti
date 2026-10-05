@@ -212,6 +212,7 @@ def main(documenti_dir: Optional[str] = None) -> None:
                 ore_max_giornata=entry["ore_max_giornata"],
                 flag_chiusura=entry.get("flag_chiusura", False),
                 flag_stage_classe_id=None,
+                flag_stage_gruppo=entry.get("flag_stage_gruppo", False),
             ))
         logger.info(f"Calendario: {len(calendario_entries)} righe")
 

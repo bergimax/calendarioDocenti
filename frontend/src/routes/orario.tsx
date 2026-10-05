@@ -325,6 +325,21 @@ function SchedulePage() {
     }
   }
 
+  async function exportExcel() {
+    try {
+      const res = await api<{ xlsx_url: string; filename: string }>(`/api/schedule/${week}/export-excel`);
+      const blob = await apiBlob(res.xlsx_url);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = res.filename;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setNotice(apiErrorMessage(err));
+    }
+  }
+
   const conflicts: Conflict[] = active?.conflicts ?? [];
   const approved = active?.stato === "APPROVATO";
 
@@ -356,6 +371,9 @@ function SchedulePage() {
           ) : null}
           <Button variant="solid" onClick={exportPdf} disabled={!active}>
             Esporta PDF
+          </Button>
+          <Button variant="solid" onClick={exportExcel} disabled={!active}>
+            Esporta Excel
           </Button>
         </>
       }
@@ -706,7 +724,7 @@ function ScheduleTable({
                     if (stageClassi.has(c.id)) {
                       return (
                         <td key={c.id} className="border-b border-edge px-2 py-2">
-                          <div className="rounded-md border border-warn bg-warn/20 px-2 py-1 text-center font-semibold text-warn">
+                          <div className="rounded-md border border-yellow-500 bg-yellow-300 px-2 py-1 text-center font-semibold text-black">
                             STAGE
                           </div>
                         </td>

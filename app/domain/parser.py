@@ -21,6 +21,10 @@ MESI_ITALIANI = {
 # "CALENDARIO AF" table layout used by this school (see specs.md 3.1). If the
 # school changes this template, these ranges - and the < 140 cutoff used to
 # isolate the date column in parse_calendario_pdf - may need updating.
+# In the school's calendar PDF a day listed with this many hours (vs the usual
+# 4-6) means that year-group is out on stage/tirocinio: no lessons at all.
+STAGE_ORE_GIORNATA = 8
+
 CALENDARIO_PDF_GRUPPI_COLONNE = [
     ("PRIME", (140, 195)),
     ("SECONDE", (195, 250)),
@@ -187,6 +191,7 @@ class CalendarParser:
                                 "ore_max_giornata": ore,
                                 "flag_chiusura": False,
                                 "stage_classe_id": None,
+                                "flag_stage_gruppo": ore >= STAGE_ORE_GIORNATA,
                             })
 
             if all_dates_seen:
