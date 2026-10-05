@@ -395,3 +395,18 @@ def test_contractor_is_never_scheduled_when_unavailable():
     solver = ScheduleSolver(ctx)
     solver.build_model()
     assert solver.solve(timeout_seconds=10) == "INFEASIBLE"
+
+
+def test_contractor_penalties_scale_with_scarcity_of_availability():
+    """Little availability -> heavier target/gap penalties; plenty -> lighter."""
+    def scarcity(fasce):
+        solver = ScheduleSolver(_contractor_ctx(ore_residue=30, giorni_fasce=fasce))
+        return solver._contractor_scarcity("d1")
+
+    full = _full_availability()
+    little = _full_availability(days=("lunedi",))  # 6h of 30
+    assert scarcity(full) == 0.5
+    assert scarcity(little) == 1.5 - 6 / 30
+    assert scarcity(little) > scarcity(full)
+    # not a contractor -> neutral
+    assert ScheduleSolver(_minimal_context())._contractor_scarcity("d1") == 1.0

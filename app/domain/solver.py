@@ -1223,6 +1223,30 @@ class ScheduleSolver:
                     },
                 ))
 
+    def _contractor_scarcity(self, docente_id: str) -> float:
+        """
+        Multiplier (0.5 .. 1.5) for the target/gap penalties of a CONTRATTO
+        docente, from how much of the week they are available: very little
+        availability -> 1.5 (their hours and gaps weigh more, they are placed
+        first); fully available -> 0.5 (more flexibility). Anything that is
+        not a contractor, or who has a deroga lifting the availability, is 1.0.
+        """
+        if self.context.docenti_map.get(docente_id) != "CONTRATTO":
+            return 1.0
+        if self._deroga_active("override_availability", docente_id=docente_id):
+            return 1.0
+        disp = self.context.disponibilita_map.get(docente_id)
+        if not disp:
+            return 1.5
+        total = 5 * 6
+        free = sum(
+            1
+            for fasce in disp.giorni_fasce.values()
+            for f in fasce
+            if f.get("disponibile", False)
+        )
+        return 1.5 - min(free, total) / total
+
     def _soft_ore_target_deviation(self) -> None:
         """Soft: Minimize deviation from target hours per assegnazione (weight 15)."""
         # Weekly hours must match the target exactly (admin decision): every
@@ -1290,7 +1314,9 @@ class ScheduleSolver:
                 self.model.Add(deviation >= ore_target - ore_assigned)
 
                 self.soft_penalties.append(SoftPenalty(
-                    var=deviation, weight=weight, kind="ore_target_deviation",
+                    var=deviation,
+                    weight=max(1, round(weight * self._contractor_scarcity(asg.docente_id))),
+                    kind="ore_target_deviation",
                     description=(
                         f"Ore di {asg.docente_nome} su {asg.classe_nome}/{asg.materia_nome} "
                         f"lontane dal target settimanale ({ore_target}h)"
@@ -1351,7 +1377,9 @@ class ScheduleSolver:
                     gap = self.model.NewBoolVar(f"gap_{docente_id}_{giorno}_{ora}")
                     self.model.Add(gap >= before + after - busy[ora] - 1)
                     self.soft_penalties.append(SoftPenalty(
-                        var=gap, weight=weight, kind="contractor_gap",
+                        var=gap,
+                        weight=max(1, round(weight * self._contractor_scarcity(docente_id))),
+                        kind="contractor_gap",
                         description=(
                             f"Buchi orari per {docente_nome} (contratto) "
                             f"({GIORNI_NOMI_IT[GiornoEnum(giorno).name]})"
