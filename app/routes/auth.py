@@ -26,7 +26,7 @@ def login(data: LoginRequest, db: Session = Depends(get_db)) -> LoginResponse:
     token = generate_session_token()
     db.add(AdminSession(token=token, admin_id=admin.id, expires_at=datetime.utcnow() + SESSION_TTL))
     db.commit()
-    return LoginResponse(status="ok", token=token, email=admin.email)
+    return LoginResponse(status="ok", token=token, email=admin.email, role=admin.role or "ADMIN")
 
 
 @router.post("/auth/logout")
@@ -43,4 +43,4 @@ def logout(authorization: Optional[str] = Header(None), db: Session = Depends(ge
 
 @router.get("/auth/me")
 def me(admin: Admin = Depends(get_current_admin)) -> Dict[str, Any]:
-    return {"email": admin.email}
+    return {"email": admin.email, "role": admin.role or "ADMIN"}

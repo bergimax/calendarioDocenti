@@ -1,5 +1,6 @@
 import { Link, useNavigate } from "@tanstack/react-router";
 import type { ReactNode } from "react";
+import { isSegreteria } from "@/lib/api";
 
 const NAV = [
   { to: "/menu", label: "Panoramica" },
@@ -25,6 +26,9 @@ export function AppShell({
   rail?: ReactNode;
 }) {
   const navigate = useNavigate();
+  const segreteria = isSegreteria();
+  // La segreteria vede solo disponibilità e orario (sola lettura).
+  const nav = NAV.filter((i) => !segreteria || i.to === "/menu" || i.to === "/disponibilita" || i.to === "/orario");
 
   return (
     <div className="flex min-h-screen bg-background text-foreground">
@@ -39,7 +43,7 @@ export function AppShell({
           </div>
         </div>
         <nav className="space-y-0.5 p-3 text-sm">
-          {NAV.map((item) => (
+          {nav.map((item) => (
             <Link
               key={item.to}
               to={item.to}
@@ -56,8 +60,8 @@ export function AppShell({
               MA
             </div>
             <div className="min-w-0 flex-1">
-              <div className="truncate text-xs font-semibold">Amministratore</div>
-              <div className="label-mono">School Admin</div>
+              <div className="truncate text-xs font-semibold">{segreteria ? "Segreteria" : "Amministratore"}</div>
+              <div className="label-mono">{segreteria ? "Sola lettura" : "School Admin"}</div>
             </div>
           </div>
           <button

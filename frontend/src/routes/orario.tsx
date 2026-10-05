@@ -13,7 +13,7 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
-import { API_BASE_URL, api, apiBlob, apiErrorMessage } from "@/lib/api";
+import { API_BASE_URL, api, apiBlob, apiErrorMessage, isSegreteria } from "@/lib/api";
 import type {
   ChatMessage,
   Conflict,
@@ -340,6 +340,7 @@ function SchedulePage() {
     }
   }
 
+  const readOnly = isSegreteria();
   const conflicts: Conflict[] = active?.conflicts ?? [];
   const approved = active?.stato === "APPROVATO";
 
@@ -378,7 +379,7 @@ function SchedulePage() {
         </>
       }
       rail={
-        <SidePanel
+        readOnly ? undefined : <SidePanel
           week={week}
           schedule={active}
           conflicts={conflicts}
@@ -407,7 +408,7 @@ function SchedulePage() {
               ? `${classi.length} classi · ${active.slots.length} lezioni · stato ${active.stato ?? "BOZZA"}`
               : "Nessun orario caricato"}
           </span>
-          <div className="ml-auto flex items-center gap-2">
+          <div className="ml-auto flex items-center gap-2" hidden={readOnly}>
             <Button onClick={() => generate("regenerate")} disabled={!week || generating}>
               Genera da zero
             </Button>
@@ -452,13 +453,15 @@ function SchedulePage() {
               />
             </div>
           </div>
-          <Button
-            variant="primary"
-            onClick={() => generate("generate")}
-            disabled={!week || generating}
-          >
-            {generating ? "Solver in esecuzione…" : "Genera nuovo orario"}
-          </Button>
+          {readOnly ? null : (
+            <Button
+              variant="primary"
+              onClick={() => generate("generate")}
+              disabled={!week || generating}
+            >
+              {generating ? "Solver in esecuzione…" : "Genera nuovo orario"}
+            </Button>
+          )}
         </div>
 
         <div className="flex items-center gap-4 font-mono text-[11px] text-muted-foreground">
@@ -503,12 +506,16 @@ function SchedulePage() {
             highlightTeacher={highlightTeacher}
             onHighlightTeacher={setHighlightTeacher}
             onSelectSlot={(slot) => {
+              if (readOnly) return;
               setSelectedSlot(slot);
               setSelectedCell(null);
             }}
             conflictSel={conflictSel}
-            onSelectConflict={setConflictSel}
+            onSelectConflict={(sel) => {
+              if (!readOnly) setConflictSel(sel);
+            }}
             onSelectCell={(cell) => {
+              if (readOnly) return;
               setSelectedCell(cell);
               setSelectedSlot(null);
             }}
@@ -524,7 +531,7 @@ function SchedulePage() {
           />
         ) : null}
 
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2" hidden={readOnly}>
           {QUICK_ACTIONS.map((a) => (
             <QuickActionDialog
               key={a.action_type}

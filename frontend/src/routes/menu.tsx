@@ -1,5 +1,6 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { AppShell } from "@/components/AppShell";
+import { isSegreteria } from "@/lib/api";
 
 export const Route = createFileRoute("/menu")({
   head: () => ({
@@ -40,10 +41,11 @@ const CARDS = [
 ] as const;
 
 function MenuPage() {
+  const cards = CARDS.filter((c) => !isSegreteria() || c.to === "/disponibilita" || c.to === "/orario");
   return (
     <AppShell title="Panoramica" subtitle="Anno formativo in corso">
       <div className="grid max-w-4xl grid-cols-2 gap-4">
-        {CARDS.map((c) => (
+        {cards.map((c) => (
           <Link
             key={c.to}
             to={c.to}

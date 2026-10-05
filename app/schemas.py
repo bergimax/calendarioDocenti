@@ -349,6 +349,7 @@ class LoginResponse(BaseModel):
     status: str
     token: str
     email: str
+    role: str = "ADMIN"
 
 
 class ScheduleFeedbackRequest(BaseModel):

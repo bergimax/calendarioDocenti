@@ -5,7 +5,8 @@ registration endpoint (v1 is single-admin/single-tenant, see specs.md scope),
 so this is the only way to provision the account.
 
 Usage:
-    python -m scripts.create_admin <email> <password> [scuola_id]
+    python -m scripts.create_admin <email> <password> [scuola_id] [ruolo]
+    ruolo: ADMIN (default) or SEGRETERIA (read-only + docenti availability)
     (scuola_id defaults to "sch_1", the only school in this v1 app)
 """
 
@@ -14,13 +15,17 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.database import Base, engine, SessionLocal  # noqa: E402
+from app.database import Base, engine, SessionLocal, ensure_admin_role_column  # noqa: E402
 from app.models import Admin  # noqa: E402
-from app.security import hash_password  # noqa: E402
+from app.security import ROLES, hash_password  # noqa: E402
 
 
-def main(email: str, password: str, scuola_id: str = "sch_1") -> None:
+def main(email: str, password: str, scuola_id: str = "sch_1", ruolo: str = "ADMIN") -> None:
+    ruolo = ruolo.strip().upper()
+    if ruolo not in ROLES:
+        sys.exit(f"Ruolo non valido {ruolo!r}: usa {' o '.join(ROLES)}.")
     Base.metadata.create_all(bind=engine)
+    ensure_admin_role_column()
     email = email.strip().lower()
 
     db = SessionLocal()
@@ -28,11 +33,14 @@ def main(email: str, password: str, scuola_id: str = "sch_1") -> None:
         admin = db.query(Admin).filter(Admin.email == email).first()
         if admin:
             admin.password_hash = hash_password(password)
-            print(f"Updated password for existing admin {email!r}.")
+            admin.role = ruolo
+            print(f"Updated password/role ({ruolo}) for existing user {email!r}.")
         else:
-            admin = Admin(scuola_id=scuola_id, email=email, password_hash=hash_password(password))
+            admin = Admin(
+                scuola_id=scuola_id, email=email, password_hash=hash_password(password), role=ruolo
+            )
             db.add(admin)
-            print(f"Created admin {email!r} for scuola_id={scuola_id!r}.")
+            print(f"Created user {email!r} ({ruolo}) for scuola_id={scuola_id!r}.")
         db.commit()
     finally:
         db.close()
@@ -40,6 +48,7 @@ def main(email: str, password: str, scuola_id: str = "sch_1") -> None:
 
 if __name__ == "__main__":
     if len(sys.argv) < 3:
-        print("Usage: python -m scripts.create_admin <email> <password> [scuola_id]")
+        print("Usage: python -m scripts.create_admin <email> <password> [scuola_id] [ruolo]")
+        print("  ruolo: ADMIN (default) or SEGRETERIA (read-only + docenti availability)")
         sys.exit(1)
-    main(*sys.argv[1:4])
+    main(*sys.argv[1:5])

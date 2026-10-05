@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 from datetime import date
 from typing import Dict, Any, List
 from app.database import get_db
-from app.security import get_current_admin
+from app.security import get_current_admin, require_admin
 from app.services.availability import AvailabilityService
 from app.schemas import AvailabilityResponse, AvailabilitySaveRequest
 import logging
@@ -34,7 +34,7 @@ def list_teachers(db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-@router.post("/teachers")
+@router.post("/teachers", dependencies=[Depends(require_admin)])
 def create_teacher(data: Dict[str, Any], db: Session = Depends(get_db)) -> Dict[str, Any]:
     """Create a docente ("Dati scuola" management page)."""
     scuola_id = _get_current_school_id()
@@ -47,7 +47,7 @@ def create_teacher(data: Dict[str, Any], db: Session = Depends(get_db)) -> Dict[
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-@router.put("/teachers/{teacher_id}")
+@router.put("/teachers/{teacher_id}", dependencies=[Depends(require_admin)])
 def update_teacher(teacher_id: str, data: Dict[str, Any], db: Session = Depends(get_db)) -> Dict[str, Any]:
     scuola_id = _get_current_school_id()
     try:
@@ -59,7 +59,7 @@ def update_teacher(teacher_id: str, data: Dict[str, Any], db: Session = Depends(
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-@router.delete("/teachers/{teacher_id}")
+@router.delete("/teachers/{teacher_id}", dependencies=[Depends(require_admin)])
 def delete_teacher(teacher_id: str, db: Session = Depends(get_db)) -> Dict[str, Any]:
     scuola_id = _get_current_school_id()
     try:

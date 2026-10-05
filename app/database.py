@@ -31,3 +31,14 @@ def get_db():
 def receive_connect(dbapi_conn, connection_record):
     """Enable JSON support."""
     pass  # psycopg2 automatically supports JSON
+
+
+def ensure_admin_role_column() -> None:
+    """create_all never alters an existing table: add admin.role to databases
+    created before roles existed (existing accounts stay full admins)."""
+    from sqlalchemy import inspect, text
+
+    if "role" in {c["name"] for c in inspect(engine).get_columns("admin")}:
+        return
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE admin ADD COLUMN role VARCHAR(20) NOT NULL DEFAULT 'ADMIN'"))

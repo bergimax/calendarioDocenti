@@ -1,6 +1,6 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
-import { api, apiErrorMessage, setAuthToken } from "@/lib/api";
+import { api, apiErrorMessage, setAuthRole, setAuthToken } from "@/lib/api";
 import { Button, Field } from "@/components/ui-kit";
 
 export const Route = createFileRoute("/")({
@@ -34,11 +34,12 @@ function LoginPage() {
     setLoading(true);
     setError(null);
     try {
-      const res = await api<{ token: string }>("/api/auth/login", {
+      const res = await api<{ token: string; role?: string }>("/api/auth/login", {
         method: "POST",
         body: { email, password },
       });
       setAuthToken(res.token);
+      setAuthRole(res.role ?? "ADMIN");
       navigate({ to: "/menu" });
     } catch (err) {
       setError(apiErrorMessage(err));

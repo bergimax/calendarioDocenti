@@ -6,10 +6,10 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import Admin
 from app.schemas import ApplyWeightsRequest, ResetWeightsRequest
-from app.security import get_current_admin
+from app.security import get_current_admin, require_admin
 from app.services.soft_weights import SoftWeightService, UnknownKind
 
-router = APIRouter(dependencies=[Depends(get_current_admin)])
+router = APIRouter(dependencies=[Depends(require_admin)])
 
 
 @router.get("/soft-weights")

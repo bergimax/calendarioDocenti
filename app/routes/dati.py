@@ -2,12 +2,12 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import Any, Dict, List
 from app.database import get_db
-from app.security import get_current_admin
+from app.security import require_admin_for_writes
 from app.services.dati import SchoolDataService
 import logging
 
 logger = logging.getLogger(__name__)
-router = APIRouter(dependencies=[Depends(get_current_admin)])
+router = APIRouter(dependencies=[Depends(require_admin_for_writes)])
 
 
 def _get_current_school_id() -> str:

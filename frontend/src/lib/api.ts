@@ -12,10 +12,37 @@ const AUTH_TOKEN_KEY = "authToken";
 export function setAuthToken(token: string | null): void {
   try {
     if (token) sessionStorage.setItem(AUTH_TOKEN_KEY, token);
-    else sessionStorage.removeItem(AUTH_TOKEN_KEY);
+    else {
+      sessionStorage.removeItem(AUTH_TOKEN_KEY);
+      sessionStorage.removeItem("authRole");
+    }
   } catch {
     /* sessionStorage non disponibile (es. modalità privata) */
   }
+}
+
+const AUTH_ROLE_KEY = "authRole";
+
+export function setAuthRole(role: string | null): void {
+  try {
+    if (role) sessionStorage.setItem(AUTH_ROLE_KEY, role);
+    else sessionStorage.removeItem(AUTH_ROLE_KEY);
+  } catch {
+    /* sessionStorage non disponibile */
+  }
+}
+
+/** "ADMIN" (accesso completo) o "SEGRETERIA" (sola lettura + disponibilità docenti). */
+export function getAuthRole(): string {
+  try {
+    return sessionStorage.getItem(AUTH_ROLE_KEY) ?? "ADMIN";
+  } catch {
+    return "ADMIN";
+  }
+}
+
+export function isSegreteria(): boolean {
+  return getAuthRole() === "SEGRETERIA";
 }
 
 function getAuthToken(): string | null {

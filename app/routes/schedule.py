@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 from datetime import date
 from typing import Dict, Any
 from app.database import get_db
-from app.security import get_current_admin
+from app.security import get_current_admin, require_admin_for_writes
 from app.services.schedule import ScheduleService
 from app.services.feedback import FeedbackService, UnknownMotivo
 from app.models import Admin
@@ -11,7 +11,7 @@ from app.schemas import ScheduleGenerateRequest, ScheduleGenerateResponse, Modif
 import logging
 
 logger = logging.getLogger(__name__)
-router = APIRouter(dependencies=[Depends(get_current_admin)])
+router = APIRouter(dependencies=[Depends(require_admin_for_writes)])
 
 
 def _get_current_school_id() -> str:

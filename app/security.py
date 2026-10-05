@@ -15,7 +15,7 @@ import secrets
 from datetime import datetime
 from typing import Optional
 
-from fastapi import Depends, Header, HTTPException
+from fastapi import Depends, Header, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -65,4 +65,32 @@ def get_current_admin(
     admin = db.query(Admin).filter(Admin.id == session.admin_id).first()
     if not admin:
         raise HTTPException(status_code=401, detail="Not authenticated")
+    return admin
+
+
+ROLE_ADMIN = "ADMIN"
+ROLE_SEGRETERIA = "SEGRETERIA"
+ROLES = (ROLE_ADMIN, ROLE_SEGRETERIA)
+
+_READ_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+
+def _is_admin_role(admin: Admin) -> bool:
+    # A missing role (accounts created before roles existed) means full admin.
+    return (admin.role or ROLE_ADMIN) == ROLE_ADMIN
+
+
+def require_admin(admin: Admin = Depends(get_current_admin)) -> Admin:
+    """Full-admin only: 403 for any other role (e.g. SEGRETERIA)."""
+    if not _is_admin_role(admin):
+        raise HTTPException(status_code=403, detail="Permesso negato: serve un account amministratore")
+    return admin
+
+
+def require_admin_for_writes(
+    request: Request, admin: Admin = Depends(get_current_admin)
+) -> Admin:
+    """Any logged-in user may read; only a full admin may change anything."""
+    if request.method not in _READ_METHODS and not _is_admin_role(admin):
+        raise HTTPException(status_code=403, detail="Permesso negato: account in sola lettura")
     return admin

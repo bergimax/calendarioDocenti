@@ -360,6 +360,9 @@ class Admin(Base):
     scuola_id = Column(String, ForeignKey("scuola.id"), nullable=False)
     email = Column(String(255), unique=True, nullable=False, index=True)
     password_hash = Column(String, nullable=False)
+    # "ADMIN": full access. "SEGRETERIA": read-only on everything except the
+    # docenti availability, which it may edit (see app/security.py).
+    role = Column(String(20), nullable=False, default="ADMIN", server_default="ADMIN")
     created_at = Column(DateTime, server_default=func.now())
 
 

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Creates (or resets the password of) the school admin account - see
 # scripts/create_admin.py. Run after the first `deploy/up.sh`.
-# Usage: deploy/create-admin.sh admin@scuola.it "una password robusta"
+# Usage: deploy/create-admin.sh admin@scuola.it "una password robusta" [ADMIN|SEGRETERIA]
+# SEGRETERIA = sola lettura (orario) + modifica disponibilità docenti.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -10,4 +11,4 @@ if [ $# -lt 2 ]; then
   exit 1
 fi
 
-docker compose --env-file .env.production exec backend python -m scripts.create_admin "$1" "$2"
+docker compose --env-file .env.production exec backend python -m scripts.create_admin "$1" "$2" sch_1 "${3:-ADMIN}"

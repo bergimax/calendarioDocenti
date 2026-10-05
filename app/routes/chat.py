@@ -4,14 +4,14 @@ from sqlalchemy.orm import Session
 from datetime import date
 from typing import Dict, Any
 from app.database import get_db
-from app.security import get_current_admin
+from app.security import require_admin
 from app.services.chat import ChatService
 from app.schemas import ChatMessageCreate
 import json
 import logging
 
 logger = logging.getLogger(__name__)
-router = APIRouter(dependencies=[Depends(get_current_admin)])
+router = APIRouter(dependencies=[Depends(require_admin)])
 
 
 def _get_current_school_id() -> str:
