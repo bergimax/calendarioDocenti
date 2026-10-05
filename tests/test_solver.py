@@ -359,3 +359,39 @@ def test_forced_mode_reports_an_hour_outside_the_day_instead_of_rejecting_it():
     assert forced.solve_fixed(keys) in ("OPTIMAL", "FEASIBLE")
     over = [c for c in forced.get_conflicts() if c["chiave"].startswith("classe_over_capacity")]
     assert over and all(c["ore_slot"] for c in over)
+
+
+def _contractor_ctx(ore_residue, giorni_fasce):
+    return _minimal_context(
+        assegnazioni=[
+            AssegnazioneDati(
+                "a1", "d1", "Prof Rossi", "CONTRATTO", "c1", "1A", "m1", "Matematica",
+                "TEORIA", "ALTO", ore_residue=ore_residue,
+            ),
+        ],
+        docenti_map={"d1": "CONTRATTO"},
+        disponibilita_map={"d1": DisponibilitaDati("d1", giorni_fasce)},
+    )
+
+
+def test_contractor_may_exceed_monte_ore():
+    """A CONTRATTO docente is only bounded by availability, not by the monte ore."""
+    ctx = _contractor_ctx(ore_residue=10, giorni_fasce=_full_availability())
+    solver = ScheduleSolver(ctx)
+    solver.build_model()
+    assert solver.solve(timeout_seconds=10) in ("OPTIMAL", "FEASIBLE")
+    assert len(solver.extract_solution()) == 30  # 6h x 5 days, > 10h of monte ore
+
+
+def test_contractor_is_never_scheduled_when_unavailable():
+    """
+    A CONTRATTO docente is never placed in an hour they're unavailable, even
+    if that leaves a classroom hour unfillable: the strict model is infeasible
+    (the admin must then grant the override_availability deroga explicitly).
+    """
+    fasce = _full_availability()
+    fasce["lunedi"][-1]["disponibile"] = False  # unavailable Monday 13:00
+    ctx = _contractor_ctx(ore_residue=30, giorni_fasce=fasce)
+    solver = ScheduleSolver(ctx)
+    solver.build_model()
+    assert solver.solve(timeout_seconds=10) == "INFEASIBLE"

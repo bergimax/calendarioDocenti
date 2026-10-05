@@ -1,5 +1,7 @@
 """End-to-end tests for the /api/schedule routes."""
 
+from app.domain.soft_weights import DEFAULT_SOFT_WEIGHTS
+
 
 def _generated_slots(client, week):
     """Generate + fetch the persisted schedule, whose slots carry real DB
@@ -472,7 +474,7 @@ def test_applying_a_proposal_changes_the_weight_once_and_can_be_reset(client, sc
     _rate(client, week, 2, ["contractor_gap"])
 
     state = client.post("/api/soft-weights/apply", json={}).json()
-    assert _weight(state, "contractor_gap") > 12
+    assert _weight(state, "contractor_gap") > DEFAULT_SOFT_WEIGHTS["contractor_gap"]
     assert state["proposals"] == []  # the same ratings are not counted again
     assert state["history"][0]["kind"] == "contractor_gap"
 
@@ -481,7 +483,7 @@ def test_applying_a_proposal_changes_the_weight_once_and_can_be_reset(client, sc
     assert _weight(again, "contractor_gap") == _weight(state, "contractor_gap")
 
     reset = client.post("/api/soft-weights/reset", json={"kind": "contractor_gap"}).json()
-    assert _weight(reset, "contractor_gap") == 12
+    assert _weight(reset, "contractor_gap") == DEFAULT_SOFT_WEIGHTS["contractor_gap"]
     assert reset["proposals"] == []  # ratings before the reset are not reused
     assert len(reset["history"]) == 2 and reset["history"][0]["reset"] is True
 

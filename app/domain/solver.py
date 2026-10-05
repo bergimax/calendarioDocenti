@@ -9,6 +9,9 @@ from app.domain.soft_weights import resolve_soft_weights
 
 logger = logging.getLogger(__name__)
 
+# Per hour of deviation from a docente's weekly target (see _soft_ore_target_deviation).
+EXACT_TARGET_WEIGHT = 500
+
 GIORNI_NOMI_IT = {
     "LUNEDI": "Lunedì", "MARTEDI": "Martedì", "MERCOLEDI": "Mercoledì",
     "GIOVEDI": "Giovedì", "VENERDI": "Venerdì",
@@ -790,6 +793,19 @@ class ScheduleSolver:
                 if not unavailable_ore:
                     continue
 
+                if not self.forced:
+                    # Generating: a CONTRATTO docente is NEVER placed where
+                    # they are unavailable (admin decision). If that leaves a
+                    # week unfillable the solver reports it (INFEASIBLE /
+                    # unfilled hours) and the admin can grant the
+                    # override_availability deroga explicitly.
+                    for asg in asgs:
+                        for hora_idx in unavailable_ore:
+                            key = (asg.assegnazione_id, giorno, hora_idx)
+                            if key in self.x:
+                                self.model.Add(self.x[key] == 0)
+                    continue
+
                 relax = self.model.NewBoolVar(f"avail_override_{docente_id}_{giorno}")
                 for asg in asgs:
                     for hora_idx in unavailable_ore:
@@ -911,8 +927,12 @@ class ScheduleSolver:
 
     def _constraint_monte_ore_limit(self) -> None:
         """Hard constraint 6: Don't exceed residual hours for assegnazione."""
+        # A CONTRATTO docente may exceed the monte ore (admin decision): their
+        # hours are only bounded by their availability, so no cap for them.
         if self.forced:
             for asg in self.context.assegnazioni:
+                if self.context.docenti_map.get(asg.docente_id) == "CONTRATTO":
+                    continue
                 mine = [
                     self.x[(asg.assegnazione_id, giorno, ora)]
                     for giorno in range(5) for ora in range(6)
@@ -933,6 +953,8 @@ class ScheduleSolver:
                 ))
             return
         for asg in self.context.assegnazioni:
+            if self.context.docenti_map.get(asg.docente_id) == "CONTRATTO":
+                continue
             if asg.ore_residue <= 0:
                 # No hours left -> can't assign
                 for giorno in range(5):
@@ -1203,7 +1225,11 @@ class ScheduleSolver:
 
     def _soft_ore_target_deviation(self) -> None:
         """Soft: Minimize deviation from target hours per assegnazione (weight 15)."""
-        weight = self._soft_weights["ore_target_deviation"]
+        # Weekly hours must match the target exactly (admin decision): every
+        # hour of deviation costs EXACT_TARGET_WEIGHT, above any ordinary
+        # preference but below availability and "classe_unfilled", so it only
+        # gives way when a classroom hour could not be filled otherwise.
+        weight = EXACT_TARGET_WEIGHT + self._soft_weights["ore_target_deviation"]
 
         # Calculate weeks remaining until end of the anno formativo
         weeks_in_year = (self.context.anno_fine - self.context.week_start).days // 7
@@ -1212,6 +1238,10 @@ class ScheduleSolver:
 
         for asg in self.context.assegnazioni:
             if asg.ore_residue <= 0:
+                continue
+            # A classe with no lesson hours at all this week (e.g. whole
+            # week in stage) cannot receive its target: don't penalize that.
+            if all(self._ore_max_for_classe_giorno(asg.classe_id, g) == 0 for g in range(5)):
                 continue
 
             # Target: spread residual hours evenly across remaining weeks
@@ -1255,7 +1285,7 @@ class ScheduleSolver:
                 ore_assigned = sum(slots_for_asg)
 
                 # Create deviation var: |ore_assigned - ore_target|
-                deviation = self.model.NewIntVar(0, asg.ore_residue, f"deviation_{asg.assegnazione_id}")
+                deviation = self.model.NewIntVar(0, max(asg.ore_residue, ore_target, 30), f"deviation_{asg.assegnazione_id}")
                 self.model.Add(deviation >= ore_assigned - ore_target)
                 self.model.Add(deviation >= ore_target - ore_assigned)
 
@@ -1291,42 +1321,46 @@ class ScheduleSolver:
             docente_nome = docente_asgs[0].docente_nome if docente_asgs else docente_id
 
             for giorno in range(5):
-                # Find first and last hours with slots
-                all_hours = [
-                    ora for asg in docente_asgs
-                    for ora in range(6)
-                    if (asg.assegnazione_id, giorno, ora) in self.x
-                ]
-
-                if len(all_hours) < 2:
-                    continue
-
-                first_hour = min(all_hours)
-                last_hour = max(all_hours)
-
-                # Add penalty for gaps
-                # Simplified: for each gap hour, add small penalty
-                for ora in range(first_hour, last_hour):
-                    no_slot_vars = [
-                        (1 - self.x[(asg.assegnazione_id, giorno, ora)])
+                # busy[h] = the docente teaches some classe at hour h (a
+                # docente is never in two classi at once, so the sum is 0/1).
+                busy: Dict[int, Any] = {}
+                for ora in range(6):
+                    vars_h = [
+                        self.x[(asg.assegnazione_id, giorno, ora)]
                         for asg in docente_asgs
                         if (asg.assegnazione_id, giorno, ora) in self.x
                     ]
+                    if vars_h:
+                        b = self.model.NewBoolVar(f"busy_{docente_id}_{giorno}_{ora}")
+                        self.model.Add(sum(vars_h) == b)
+                        busy[ora] = b
+                if len(busy) < 3:
+                    continue
 
-                    if no_slot_vars:
-                        gap_penalty = self.model.NewIntVar(0, len(no_slot_vars), f"gap_{docente_id}_{giorno}_{ora}")
-                        self.model.Add(gap_penalty >= sum(no_slot_vars) - len(no_slot_vars) + 1)
-                        self.soft_penalties.append(SoftPenalty(
-                            var=gap_penalty, weight=weight // 6, kind="contractor_gap",  # distribute weight
-                            description=(
-                                f"Buchi orari per {docente_nome} (contratto) "
-                                f"({GIORNI_NOMI_IT[GiornoEnum(giorno).name]})"
-                            ),
-                            docente_id=docente_id, giorno=giorno,
-                            suggested_action={
-                                "action_type": "authorize_early_exit", "label": "Autorizza uscita anticipata",
-                            },
-                        ))
+                # A real gap is an hour with no lesson but a lesson both
+                # before and after it that day (not just any free hour).
+                for ora in busy:
+                    earlier = [busy[k] for k in busy if k < ora]
+                    later = [busy[k] for k in busy if k > ora]
+                    if not earlier or not later:
+                        continue
+                    before = self.model.NewBoolVar(f"before_{docente_id}_{giorno}_{ora}")
+                    after = self.model.NewBoolVar(f"after_{docente_id}_{giorno}_{ora}")
+                    self.model.AddMaxEquality(before, earlier)
+                    self.model.AddMaxEquality(after, later)
+                    gap = self.model.NewBoolVar(f"gap_{docente_id}_{giorno}_{ora}")
+                    self.model.Add(gap >= before + after - busy[ora] - 1)
+                    self.soft_penalties.append(SoftPenalty(
+                        var=gap, weight=weight, kind="contractor_gap",
+                        description=(
+                            f"Buchi orari per {docente_nome} (contratto) "
+                            f"({GIORNI_NOMI_IT[GiornoEnum(giorno).name]})"
+                        ),
+                        docente_id=docente_id, giorno=giorno,
+                        suggested_action={
+                            "action_type": "authorize_early_exit", "label": "Autorizza uscita anticipata",
+                        },
+                    ))
 
     def _soft_avoid_single_classe_day(self) -> None:
         """

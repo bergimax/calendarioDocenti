@@ -20,7 +20,7 @@ DEFAULT_SOFT_WEIGHTS: Dict[str, int] = {
     "classe_late_start": 100,
     "teoria_consecutive": 10,
     "ore_target_deviation": 15,
-    "contractor_gap": 12,
+    "contractor_gap": 150,
     "single_classe_day": 10,
 }
 
