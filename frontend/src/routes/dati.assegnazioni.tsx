@@ -27,10 +27,15 @@ function AssignmentsPage() {
       columns={[
         { key: "docente", header: "Docente", render: (r) => teacherName(r.docente_id) },
         { key: "classe", header: "Classe", render: (r) => className(r.classe_id) },
+        { key: "ore_totali", header: "Ore totali", render: (r) => r.ore_totali },
+        { key: "ore_fatte", header: "Ore fatte", render: (r) => r.ore_erogate ?? 0 },
         {
-          key: "ore",
-          header: "Ore",
-          render: (r) => `${r.ore_erogate ?? 0} / ${r.ore_totali}`,
+          key: "ore_residue",
+          header: "Residuo",
+          render: (r) => {
+            const residuo = r.ore_totali - (r.ore_erogate ?? 0);
+            return residuo < 0 ? `${residuo} (oltre il monte)` : residuo;
+          },
         },
       ]}
       form={({ value, set }) => (
@@ -64,6 +69,12 @@ function AssignmentsPage() {
             type="number"
             value={value["ore_totali"] ?? ""}
             onChange={(e) => set("ore_totali", e.target.value)}
+          />
+          <Field
+            label="Ore fatte (si aggiornano da sole all'approvazione di una settimana)"
+            type="number"
+            value={value["ore_erogate"] ?? ""}
+            onChange={(e) => set("ore_erogate", e.target.value)}
           />
         </>
       )}

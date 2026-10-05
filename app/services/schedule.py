@@ -761,6 +761,50 @@ class ScheduleService:
         # Deduplicate
         return list(set(suggestions))
 
+    def scale_monte_ore(self, scuola_id: str, orario) -> Dict[str, int]:
+        """
+        Add every lesson of `orario` as 1 delivered hour to ore_erogate of its
+        assegnazione (classe + materia + docente). Does not commit and does not
+        check whether the week was already scaled: callers (approve_schedule,
+        scripts/backfill_ore_erogate.py) own that.
+        """
+        from sqlalchemy import func
+        from app.models import SlotLezione, MonteOreAnnuale
+
+        # Lessons held this week per (classe, materia, docente).
+        rows = (
+            self.db.query(
+                SlotLezione.classe_id, SlotLezione.materia_id, SlotLezione.docente_id,
+                func.count(SlotLezione.id),
+            )
+            .filter(SlotLezione.orario_settimanale_id == orario.id)
+            .group_by(SlotLezione.classe_id, SlotLezione.materia_id, SlotLezione.docente_id)
+            .all()
+        )
+        ore_scalate = 0
+        aggiornate = 0
+        senza_monte = 0
+        for classe_id, materia_id, docente_id, n in rows:
+            monte = self.db.query(MonteOreAnnuale).filter_by(
+                scuola_id=scuola_id, classe_id=classe_id,
+                materia_id=materia_id, docente_id=docente_id,
+            ).first()
+            if not monte:
+                senza_monte += 1
+                logger.warning(
+                    f"No monte ore row for classe {classe_id} / materia {materia_id} / "
+                    f"docente {docente_id}: {n}h not scaled"
+                )
+                continue
+            monte.ore_erogate = (monte.ore_erogate or 0) + n
+            ore_scalate += n
+            aggiornate += 1
+        return {
+            "ore_scalate": ore_scalate,
+            "assegnazioni_aggiornate": aggiornate,
+            "senza_monte_ore": senza_monte,
+        }
+
     def approve_schedule(self, scuola_id: str, week_start: date) -> Dict[str, Any]:
         """
         Approve schedule (change from BOZZA to APPROVATO) and lock it from
@@ -788,8 +832,7 @@ class ScheduleService:
                 }
 
             from datetime import datetime
-            from sqlalchemy import func
-            from app.models import OrarioSettimanale, AuditLog, SlotLezione, MonteOreAnnuale
+            from app.models import OrarioSettimanale, AuditLog
 
             orario = self.db.query(OrarioSettimanale).filter(
                 OrarioSettimanale.scuola_id == scuola_id,
@@ -818,34 +861,10 @@ class ScheduleService:
             orario.stato = "APPROVATO"
             orario.approved_at = datetime.utcnow()
 
-            # Lessons held this week per (classe, materia, docente).
-            rows = (
-                self.db.query(
-                    SlotLezione.classe_id, SlotLezione.materia_id, SlotLezione.docente_id,
-                    func.count(SlotLezione.id),
-                )
-                .filter(SlotLezione.orario_settimanale_id == orario.id)
-                .group_by(SlotLezione.classe_id, SlotLezione.materia_id, SlotLezione.docente_id)
-                .all()
-            )
-            ore_scalate = 0
-            aggiornate = 0
-            senza_monte = 0
-            for classe_id, materia_id, docente_id, n in rows:
-                monte = self.db.query(MonteOreAnnuale).filter_by(
-                    scuola_id=scuola_id, classe_id=classe_id,
-                    materia_id=materia_id, docente_id=docente_id,
-                ).first()
-                if not monte:
-                    senza_monte += 1
-                    logger.warning(
-                        f"No monte ore row for classe {classe_id} / materia {materia_id} / "
-                        f"docente {docente_id}: {n}h not scaled"
-                    )
-                    continue
-                monte.ore_erogate = (monte.ore_erogate or 0) + n
-                ore_scalate += n
-                aggiornate += 1
+            scaled = self.scale_monte_ore(scuola_id, orario)
+            ore_scalate = scaled["ore_scalate"]
+            aggiornate = scaled["assegnazioni_aggiornate"]
+            senza_monte = scaled["senza_monte_ore"]
 
             self.db.add(AuditLog(
                 scuola_id=scuola_id,
