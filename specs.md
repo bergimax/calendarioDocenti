@@ -264,7 +264,8 @@ nessuna disponibilità registrata viene trattato come indisponibile tutta la set
 
 - `scripts/import_documenti.py`: costruisce scuola, calendario, classi, docenti e associazioni leggendo i PDF in `Documenti/`.
 - `scripts/rederive_monte_ore_and_pairings.py`: ricalcola `ore_totali` (= ore settimanali osservate × settimane rimaste)
-  e gli accoppiamenti per docente a partire dall'orario di esempio; da rieseguire per aggiornare il residuo.
+  e gli accoppiamenti per docente a partire dall'orario di esempio, **azzerando `ore_erogate`**. Serve solo per l'inizializzazione:
+  da quando l'approvazione scala le ore (§8) **non va più rieseguito**, altrimenti si perdono le ore già erogate e quelle da recuperare.
 - `scripts/set_contratto_availability.py`, `scripts/infer_availability_from_calendars.py`: ricavano la disponibilità dei
   contrattisti dagli orari di esempio (giorni = ore/6 arrotondato, scelta con seme fisso; oppure unione delle ore osservate in due settimane).
 
@@ -288,9 +289,16 @@ I giorni di stage di una classe compaiono nelle celle di stage (`stage_cells`, �
 
 ## 8. Monte ore e target settimanale
 
-- Residuo di un'assegnazione: `ore_residue = ore_totali − ore_erogate` (0 se manca la riga `monte_ore_annuale`).
-- **`ore_erogate` non viene incrementato automaticamente** all'approvazione: oggi `ore_totali` rappresenta il residuo
-  da oggi a fine anno e va riallineato con lo script di ricalcolo (§6.3) o dalla pagina «Assegnazioni» (§17).
+- Residuo di un'assegnazione: `ore_residue = ore_totali − ore_erogate` (0 se manca la riga `monte_ore_annuale`). `ore_totali`
+  è il monte ore da svolgere dall'inizio del periodo gestito; `ore_erogate` cresce a ogni approvazione.
+- **Scalare le ore (decisione admin 2026-10-05):** all'**approvazione** della settimana (`POST /schedule/{w}/approve`)
+  ogni lezione dell'orario aggiunge **1 ora a `ore_erogate`** dell'assegnazione (docente + classe + materia) della lezione,
+  nella stessa transazione che porta lo stato a `APPROVATO`. In una lezione accoppiata ogni classe riceve la lezione, quindi
+  vengono scalate entrambe le assegnazioni. Le ore non svolte (assenze, lezioni saltate) non vengono scalate: restano nel
+  residuo e le settimane successive le recuperano, perché **il target di ogni settimana si basa sul residuo**, non sul totale.
+  L'operazione è idempotente: riapprovare una settimana già approvata non scala di nuovo (`ore_scalate: 0`). Le lezioni
+  senza riga `monte_ore_annuale` non vengono scalate e sono contate in `senza_monte_ore`. Le ore si possono sempre
+  correggere a mano dalla pagina «Assegnazioni» (campo `ore_erogate`). Non esiste (ancora) l'annullamento di un'approvazione.
 - **Target settimanale** per assegnazione: `settimane_rimaste = max(1, (data_fine_anno − week_start).days // 7)`,
   `ore_target = max(1, ore_residue // settimane_rimaste)`. Nessun target se `ore_residue ≤ 0` o se la classe non ha ore
   di lezione in tutta la settimana (es. tutta la settimana in stage). Deroga `reduce_contract_hours` (solo contrattisti):
@@ -412,7 +420,7 @@ Stati: assente → `BOZZA` → `APPROVATO` (bloccato).
 | Assegnare un'ora libera | `GET …/assignable/{classe_id}` elenca coppie docente/materia; `POST …/assign-slot {classe_id, giorno, ora_inizio, docente_id, materia_id}` | Forzatura valutata come modifica manuale (le violazioni diventano conflitti); rifiutato solo se supera le ore massime giornaliere della classe. Un docente in lezione accoppiata viene assegnato a tutte le classi del gruppo |
 | Conflitti | `POST …/conflicts/approve {chiavi}` (il conflitto non viene più segnalato); `POST …/conflicts/reject {classe_id, giorno, ora_inizio}` (toglie la lezione e lascia l'ora libera, `azione=LIBERA`) | Decisioni in `conflitto_gestito` |
 | Deroga | `POST …/apply-quick-action` | §9.7 |
-| Approvare | `POST …/approve` | `stato=APPROVATO`, voce in `audit_log` (`SCHEDULE_APPROVED`); da quel momento nessuna modifica/rigenerazione |
+| Approvare | `POST …/approve` | `stato=APPROVATO`, `approved_at`, **scala le ore delle lezioni dal monte ore (§8)**, voce in `audit_log` (`SCHEDULE_APPROVED` con `ore_scalate`, `assegnazioni_aggiornate`, `senza_monte_ore`); risposta `{status, schedule_id, stato, ore_scalate, assegnazioni_aggiornate, senza_monte_ore}`; da quel momento nessuna modifica/rigenerazione; idempotente |
 | Esportare | §12 | PDF ed Excel |
 | Valutare | `GET/POST …/feedback` | §11 |
 
@@ -558,7 +566,7 @@ disponibilità; (5) le ore dell'assegnazione sono vicine al target e comunque no
   l'amministratore o la segreteria. L'eredità dalla settimana precedente esiste già in lettura (§6).
 - **Sostituzioni in tempo reale per malattia**: non implementate.
 - **Memoria permanente delle preferenze** (`preferenze_ai_memory`): tabella presente ma non usata dal solver.
-- **`ore_erogate`** non si aggiorna da solo all'approvazione (§8); il residuo va riallineato manualmente/con script.
+- **Annullamento di un'approvazione**: non esiste; per correggere ore scalate per errore si modifica `ore_erogate` dalla pagina «Assegnazioni».
 - **Nomi docente**: il cognome nel tabellone è la prima parola di «COGNOME NOME»; i cognomi composti vengono troncati.
 - **Cache del setup** in memoria del processo (si perde al riavvio).
 - **Template PDF del calendario**: il parser dipende da coordinate fisse (§5.2).

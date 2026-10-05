@@ -515,3 +515,52 @@ def test_generation_uses_the_applied_weights(client, school_setup, monkeypatch):
     monkeypatch.setattr(solver_module, "ScheduleSolver", Spy)
     client.post(f"/api/schedule/{week}/regenerate", json={"week_start": week})
     assert seen and all(w["single_classe_day"] == new_weight for w in seen)
+
+
+def _erogate_by_assignment(client):
+    return {a["assignment_id"]: a["ore_erogate"] for a in client.get("/api/assignments").json()}
+
+
+def test_approving_a_week_scales_the_hours_of_its_lessons_once(client, school_setup):
+    week = school_setup["week_start"]
+    slots = _generated_slots(client, week)
+    assert slots
+    before = _erogate_by_assignment(client)
+    assert set(before.values()) == {0}
+
+    r = client.post(f"/api/schedule/{week}/approve")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "approved"
+    # every lesson of the week is one delivered hour on its assegnazione
+    assert body["ore_scalate"] == len(slots)
+    after = _erogate_by_assignment(client)
+    assert sum(after.values()) == len(slots)
+
+    # approving again must not scale the same hours a second time
+    again = client.post(f"/api/schedule/{week}/approve").json()
+    assert again["status"] == "approved" and again["ore_scalate"] == 0
+    assert _erogate_by_assignment(client) == after
+
+
+def test_next_weeks_residual_hours_drop_after_approval(client, school_setup):
+    from datetime import date
+
+    from app.database import SessionLocal
+    from app.repositories.schedule import ScheduleRepository
+
+    week = school_setup["week_start"]
+    _generated_slots(client, week)
+
+    def residue_total():
+        db = SessionLocal()
+        try:
+            ctx = ScheduleRepository(db).get_week_context("sch_1", date.fromisoformat(week))
+            return sum(a.ore_residue for a in ctx.assegnazioni)
+        finally:
+            db.close()
+
+    total_before = residue_total()
+    n_slots = len(client.get(f"/api/schedule/{week}").json()["slots"])
+    client.post(f"/api/schedule/{week}/approve")
+    assert residue_total() == total_before - n_slots

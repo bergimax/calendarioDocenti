@@ -763,8 +763,18 @@ class ScheduleService:
 
     def approve_schedule(self, scuola_id: str, week_start: date) -> Dict[str, Any]:
         """
-        Approve schedule (change from BOZZA to APPROVATO).
-        Lock from further modifications.
+        Approve schedule (change from BOZZA to APPROVATO) and lock it from
+        further modifications.
+
+        Approving is also the moment the week's hours are "delivered": every
+        lesson of the week is added to ore_erogate of its own assegnazione
+        (docente + classe + materia), so the residual (ore_totali -
+        ore_erogate) that the next weeks' targets are built on goes down.
+        Each classe of a joint (accoppiata) lesson receives it, so both
+        sides' assegnazioni are scaled. Hours that were not held (an absence,
+        a cancelled lesson) are simply not scaled, so the next weeks'
+        residual spreads them over the remaining weeks.
+        Idempotent: approving an already approved week scales nothing again.
         """
         logger.info(f"Approving schedule for school {scuola_id} week {week_start}")
 
@@ -777,39 +787,86 @@ class ScheduleService:
                     "message": "No schedule found for this week",
                 }
 
-            # Update stato to APPROVATO
-            from app.models import OrarioSettimanale, AuditLog
+            from datetime import datetime
+            from sqlalchemy import func
+            from app.models import OrarioSettimanale, AuditLog, SlotLezione, MonteOreAnnuale
 
             orario = self.db.query(OrarioSettimanale).filter(
                 OrarioSettimanale.scuola_id == scuola_id,
                 OrarioSettimanale.settimana_inizio == week_start,
             ).first()
 
-            if orario:
-                old_stato = orario.stato
-                orario.stato = "APPROVATO"
-                self.db.commit()
+            if not orario:
+                return {
+                    "status": "error",
+                    "message": "Schedule not found in DB",
+                }
 
-                # Audit log
-                audit = AuditLog(
-                    scuola_id=scuola_id,
-                    azione=f"SCHEDULE_APPROVED",
-                    dettagli=f"Changed from {old_stato} to APPROVATO",
-                )
-                self.db.add(audit)
-                self.db.commit()
-
-                logger.info(f"Schedule approved: {orario.id}")
-
+            if orario.stato == "APPROVATO":
+                # already approved (and its hours already scaled): nothing to do
                 return {
                     "status": "approved",
                     "schedule_id": orario.id,
                     "stato": "APPROVATO",
+                    "ore_scalate": 0,
+                    "assegnazioni_aggiornate": 0,
+                    "senza_monte_ore": 0,
+                    "message": "Orario già approvato: le ore erano già state scalate.",
                 }
 
+            old_stato = orario.stato
+            orario.stato = "APPROVATO"
+            orario.approved_at = datetime.utcnow()
+
+            # Lessons held this week per (classe, materia, docente).
+            rows = (
+                self.db.query(
+                    SlotLezione.classe_id, SlotLezione.materia_id, SlotLezione.docente_id,
+                    func.count(SlotLezione.id),
+                )
+                .filter(SlotLezione.orario_settimanale_id == orario.id)
+                .group_by(SlotLezione.classe_id, SlotLezione.materia_id, SlotLezione.docente_id)
+                .all()
+            )
+            ore_scalate = 0
+            aggiornate = 0
+            senza_monte = 0
+            for classe_id, materia_id, docente_id, n in rows:
+                monte = self.db.query(MonteOreAnnuale).filter_by(
+                    scuola_id=scuola_id, classe_id=classe_id,
+                    materia_id=materia_id, docente_id=docente_id,
+                ).first()
+                if not monte:
+                    senza_monte += 1
+                    logger.warning(
+                        f"No monte ore row for classe {classe_id} / materia {materia_id} / "
+                        f"docente {docente_id}: {n}h not scaled"
+                    )
+                    continue
+                monte.ore_erogate = (monte.ore_erogate or 0) + n
+                ore_scalate += n
+                aggiornate += 1
+
+            self.db.add(AuditLog(
+                scuola_id=scuola_id,
+                orario_settimanale_id=orario.id,
+                azione="SCHEDULE_APPROVED",
+                dettagli={
+                    "da": old_stato, "a": "APPROVATO", "ore_scalate": ore_scalate,
+                    "assegnazioni_aggiornate": aggiornate, "senza_monte_ore": senza_monte,
+                },
+            ))
+            self.db.commit()
+
+            logger.info(f"Schedule approved: {orario.id}, {ore_scalate}h scaled on {aggiornate} assegnazioni")
+
             return {
-                "status": "error",
-                "message": "Schedule not found in DB",
+                "status": "approved",
+                "schedule_id": orario.id,
+                "stato": "APPROVATO",
+                "ore_scalate": ore_scalate,
+                "assegnazioni_aggiornate": aggiornate,
+                "senza_monte_ore": senza_monte,
             }
 
         except Exception as e:

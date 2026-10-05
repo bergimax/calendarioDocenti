@@ -302,12 +302,16 @@ function SchedulePage() {
 
   async function approve() {
     try {
-      const res = await api<{ status: string; message?: string }>(`/api/schedule/${week}/approve`, {
+      const res = await api<{ status: string; message?: string; ore_scalate?: number }>(`/api/schedule/${week}/approve`, {
         method: "POST",
         body: { schedule_id: active?.schedule_id },
       });
       if (res.status === "error") throw new Error(res.message ?? "Approvazione non riuscita");
-      setNotice("Orario approvato.");
+      setNotice(
+        res.ore_scalate
+          ? `Orario approvato. Scalate ${res.ore_scalate} ore dal monte ore residuo.`
+          : "Orario approvato.",
+      );
       setSchedule(null);
       void existing.refetch();
     } catch (err) {
