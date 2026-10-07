@@ -372,8 +372,8 @@ function SchedulePage() {
               </option>
             ))}
           </Select>
-          {conflicts.length ? (
-            <Badge tone="conflict">{conflicts.length} conflitti</Badge>
+          {conflicts.filter((c) => !c.avviso).length ? (
+            <Badge tone="conflict">{conflicts.filter((c) => !c.avviso).length} conflitti</Badge>
           ) : null}
           <Button variant="solid" onClick={exportPdf} disabled={!active}>
             Esporta PDF
@@ -387,7 +387,7 @@ function SchedulePage() {
         readOnly ? undefined : <SidePanel
           week={week}
           schedule={active}
-          conflicts={conflicts}
+          conflicts={conflicts.filter((c) => c.kind === "classe_unfilled")}
           onScheduleUpdate={setSchedule}
           onQuickAction={applyQuickAction}
           selectedSlot={selectedSlot}
@@ -479,6 +479,10 @@ function SchedulePage() {
             Conflitto
           </span>
           <span className="flex items-center gap-1.5">
+            <i className="size-2.5 rounded-sm border border-warn bg-warn/20" />
+            Ore in più/in meno
+          </span>
+          <span className="flex items-center gap-1.5">
             <i className="size-2.5 rounded-sm border border-unavailable bg-unavailable/20" />
             Docente indisponibile
           </span>
@@ -533,6 +537,7 @@ function SchedulePage() {
             onApprove={() => void resolveConflict("approve")}
             onReject={() => void resolveConflict("reject")}
             onClose={() => setConflictSel(null)}
+            onQuickAction={applyQuickAction}
           />
         ) : null}
 
@@ -557,26 +562,83 @@ function SchedulePage() {
   );
 }
 
-// Band under the grid for the conflict(s) of the clicked red cell.
+// Band under the grid for the conflict(s) / warning(s) of the clicked cell: the
+// message is shown only here, not in the side list.
 function ConflictBand({
   conflicts,
   onApprove,
   onReject,
   onClose,
+  onQuickAction,
 }: {
   conflicts: Conflict[];
   onApprove: () => void;
   onReject: () => void;
   onClose: () => void;
+  onQuickAction: (
+    actionType: string,
+    opts?: {
+      classId?: string | null | undefined;
+      teacherId?: string | null | undefined;
+      giorno?: string | null | undefined;
+    },
+  ) => void;
 }) {
+  const [confirmingId, setConfirmingId] = useState<string | null>(null);
+  // solo ore in più/in meno del docente: avviso giallo, non conflitto
+  const warningOnly = conflicts.length > 0 && conflicts.every((c) => c.avviso);
   return (
-    <div className="glass rounded-2xl border-l-2 border-conflict p-4">
+    <div className={`glass rounded-2xl border-l-2 p-4 ${warningOnly ? "border-warn" : "border-conflict"}`}>
       <div className="flex items-start gap-3">
         <div className="min-w-0 flex-1">
-          <div className="label-mono text-conflict">Conflitto</div>
+          <div className={`label-mono ${warningOnly ? "text-warn" : "text-conflict"}`}>
+            {warningOnly ? "Avviso" : "Conflitto"}
+          </div>
           <ul className="mt-1 space-y-1 text-xs">
             {conflicts.length ? (
-              conflicts.map((c) => <li key={c.conflict_id}>{c.description}</li>)
+              conflicts.map((c) => (
+                <li key={c.conflict_id}>
+                  {c.description}
+                  {c.suggested_action ? (
+                    confirmingId === c.conflict_id ? (
+                      <span className="ml-2 inline-flex items-center gap-2 text-[11px]">
+                        <span className="text-muted-foreground">
+                          Applicare &ldquo;{c.suggested_action.label}&rdquo;?
+                        </span>
+                        <button
+                          type="button"
+                          className="font-semibold text-conflict"
+                          onClick={() => {
+                            setConfirmingId(null);
+                            onQuickAction(c.suggested_action!.action_type, {
+                              classId: c.classe_id,
+                              teacherId: c.docente_id,
+                              giorno: c.giorno,
+                            });
+                          }}
+                        >
+                          Sì
+                        </button>
+                        <button
+                          type="button"
+                          className="font-semibold text-muted-foreground"
+                          onClick={() => setConfirmingId(null)}
+                        >
+                          Annulla
+                        </button>
+                      </span>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setConfirmingId(c.conflict_id)}
+                        className="ml-2 text-[11px] font-semibold text-brand"
+                      >
+                        {c.suggested_action.label}
+                      </button>
+                    )
+                  ) : null}
+                </li>
+              ))
             ) : (
               <li className="text-muted-foreground">Nessuna descrizione disponibile.</li>
             )}
@@ -598,8 +660,8 @@ function ConflictBand({
         </div>
       </div>
       <p className="mt-2 text-[11px] text-muted-foreground">
-        Approva: il conflitto sparisce e le ore tornano blu. Rifiuta: la lezione viene tolta e
-        l&apos;ora resta libera.
+        Approva: {warningOnly ? "l'avviso sparisce" : "il conflitto sparisce"} e le ore tornano blu.
+        Rifiuta: la lezione viene tolta e l&apos;ora resta libera.
       </p>
     </div>
   );
@@ -826,7 +888,9 @@ function ScheduleTable({
                       ? "border-unavailable bg-unavailable/15"
                       : slot.conflitto
                         ? "border-conflict bg-conflict/10"
-                        : "border-theory bg-theory/10";
+                        : slot.avviso
+                          ? "border-warn bg-warn/15"
+                          : "border-theory bg-theory/10";
                     const dimmed =
                       highlightTeacher && !conflictSel && slot.docente_id !== highlightTeacher
                         ? "opacity-35"
@@ -846,7 +910,7 @@ function ScheduleTable({
                           onClick={() => {
                             onSelectSlot(slot);
                             onSelectConflict(
-                              slot.conflitto && slot.conflitto_chiavi?.length
+                              slot.conflitto_chiavi?.length
                                 ? {
                                     chiavi: slot.conflitto_chiavi,
                                     classe_id: slot.classe_id,
@@ -955,10 +1019,10 @@ function SidePanel({
       ) : null}
 
       <div className="border-b border-edge px-4 py-3">
-        <div className="label-mono">Conflitti</div>
+        <div className="label-mono">Mancanze</div>
         <div className="mt-2 space-y-2">
           {conflicts.length === 0 ? (
-            <p className="text-[11px] text-muted-foreground">Nessun conflitto segnalato.</p>
+            <p className="text-[11px] text-muted-foreground">Nessuna mancanza segnalata.</p>
           ) : (
             conflicts.map((c) => (
               <div key={c.conflict_id} className="rounded-lg bg-conflict/5 p-2 ring-1 ring-conflict/20">

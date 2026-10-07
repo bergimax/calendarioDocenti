@@ -270,10 +270,13 @@ class ScheduleService:
                 and s.get("classe_id") == classe_id and s.get("docente_id") == docente_id
             )
 
+        avvisi = {c.get("chiave") for c in conflicts if c.get("avviso")}
         for s in slots:
             chiavi = [chiave for chiave, *scope in scopes if chiave and in_scope(s, *scope)]
             s["conflitto_chiavi"] = chiavi
-            s["conflitto"] = bool(chiavi)
+            # Le ore in più/in meno di un docente sono un avviso (cella gialla), non un conflitto.
+            s["conflitto"] = any(k not in avvisi for k in chiavi)
+            s["avviso"] = not s["conflitto"] and bool(chiavi)
 
     def _apply_handled(self, orario_id: str, conflicts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """

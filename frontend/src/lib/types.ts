@@ -130,6 +130,8 @@ export interface SlotLezione {
   conflitto?: boolean;
   /** `chiave` of every conflict this lesson is part of. */
   conflitto_chiavi?: string[];
+  /** Ore del docente in più o in meno: cella gialla, non è un conflitto. */
+  avviso?: boolean;
   indisponibile?: boolean;
   materia_nome?: string;
   docente_nome?: string;
@@ -140,6 +142,9 @@ export interface Conflict {
   conflict_id: string;
   /** Stable id (unlike conflict_id): what approve/reject is stored against. */
   chiave?: string;
+  kind?: string;
+  /** Ore del docente in più o in meno: si vede (in giallo) solo al click sulla cella. */
+  avviso?: boolean;
   description: string;
   suggested_action?: {
     action_type: string;

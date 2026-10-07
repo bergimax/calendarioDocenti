@@ -120,6 +120,10 @@ class DerogaConfig:
     max_hours: Optional[int] = None
 
 
+# Violazioni "morbide" che sono avvisi (ore del docente in eccesso o in difetto), non conflitti.
+AVVISO_KINDS = frozenset({"ore_target_deviation", "monte_ore_exceeded"})
+
+
 @dataclass
 class SoftPenalty:
     """
@@ -1700,6 +1704,10 @@ class ScheduleSolver:
                           + (f"|{p.ora}" if p.ora is not None else ""),
                 "description": description,
                 "suggested_action": suggested_action,
+                "kind": p.kind,
+                # Ore del docente in più o in meno: non è un conflitto, la UI le
+                # segnala in giallo e mostra il messaggio solo al click sulla cella.
+                "avviso": p.kind in AVVISO_KINDS,
                 # Scope so the frontend can highlight the offending cell(s) in
                 # the grid (SlotLezioneResponse.conflitto), not just list the
                 # conflict in the sidebar - see ScheduleService._mark_slot_conflicts.

@@ -186,6 +186,8 @@ class SlotLezioneResponse(BaseModel):
     conflitto: bool = False
     # `chiave` of every conflict this lesson is part of (see ScheduleSolver.get_conflicts)
     conflitto_chiavi: List[str] = []
+    # Solo ore del docente in più/in meno: cella gialla, messaggio al click
+    avviso: bool = False
     indisponibile: bool = False
 
     class Config:
