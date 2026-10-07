@@ -1343,7 +1343,13 @@ class ScheduleSolver:
         if weeks_in_year <= 0:
             weeks_in_year = 1
 
+        # A joint lesson is ONE hour of the group's shared monte ore: the "B" sides of a pair
+        # (x_b == x_a) are the same hours, so they don't get a target of their own.
+        skip_ids = self._paired_assignment_ids_to_dedupe()
+
         for asg in self.context.assegnazioni:
+            if asg.assegnazione_id in skip_ids:
+                continue
             if asg.ore_residue <= 0:
                 continue
             # A classe with no lesson hours at all this week (e.g. whole
@@ -1574,43 +1580,56 @@ class ScheduleSolver:
 
     def _soft_paired_no_continuity(self) -> None:
         """
-        Soft: when the same docente gives a joint lesson to a pair of classes
-        in two consecutive hours (e.g. Bertussi on 2 INFO + 2 ELE at 11 and
-        12), it is penalized: in practice it is lighter to swap docenti
-        between the hours of a pair than to keep one docente fixed on it
-        (admin, 2026-10-07). Weight 150 (like the contractor gaps): a strong
-        preference, never above the relaxable-hard rules (1000), so it only
-        gives way when there is no other docente who can take the hour.
+        Soft: when the same docente gives a joint lesson to the same group of classes in two
+        consecutive hours (e.g. Bertussi on 2 INFO + 2 ELE at 11 and 12), it is penalized: in practice
+        it is lighter to swap docenti between the hours of a pair than to keep one docente fixed on it
+        (admin, 2026-10-07). Weight 150 (like the contractor gaps): a strong preference, never above
+        the relaxable-hard rules (1000), so it only gives way when there is no other docente who can
+        take the hour.
 
-        Per pair (not per docente), so back-to-back joint hours with two
-        DIFFERENT pairs are not affected.
+        One penalty per GROUP of classes of a docente (a group of 4 classes has 6 pairing rows, all the
+        same hours): a joint lesson counts once. Back-to-back joint hours with two DIFFERENT groups are
+        not affected.
         """
         weight = self._soft_weights["paired_consecutive"]
         classe_nomi = {a.classe_id: a.classe_nome for a in self.context.assegnazioni}
 
+        # docente -> list of groups, each a set of assegnazione ids joined by pairing rows
+        groups_by_docente: Dict[str, List[Set[str]]] = {}
         for classe_a, classe_b, materia_id, docente_id in self.context.classi_accoppiate:
             pair = self._paired_assignment_pair(classe_a, classe_b, materia_id, docente_id)
             if not pair:
                 continue
-            asg_a = pair[0]
-            for giorno in range(5):
-                for ora in range(5):
-                    k1 = (asg_a.assegnazione_id, giorno, ora)
-                    k2 = (asg_a.assegnazione_id, giorno, ora + 1)
-                    if k1 not in self.x or k2 not in self.x:
-                        continue
-                    both = self.model.NewBoolVar(f"paired_consec_{asg_a.assegnazione_id}_{giorno}_{ora}")
-                    self.model.AddBoolAnd([self.x[k1], self.x[k2]]).OnlyEnforceIf(both)
-                    self.model.AddBoolOr([self.x[k1].Not(), self.x[k2].Not()]).OnlyEnforceIf(both.Not())
-                    self.soft_penalties.append(SoftPenalty(
-                        var=both, weight=weight, kind="paired_consecutive",
-                        description=(
-                            f"{asg_a.docente_nome} fa ore consecutive con la stessa coppia "
-                            f"({asg_a.classe_nome} + {classe_nomi.get(classe_b, classe_b)}, "
-                            f"{GIORNI_NOMI_IT[GiornoEnum(giorno).name]})"
-                        ),
-                        docente_id=docente_id, classe_id=asg_a.classe_id, giorno=giorno, ora=8 + ora + 1,
-                    ))
+            ids = {pair[0].assegnazione_id, pair[1].assegnazione_id}
+            groups = groups_by_docente.setdefault(docente_id, [])
+            for g in [g for g in groups if g & ids]:
+                ids |= g
+                groups.remove(g)
+            groups.append(ids)
+
+        asg_by_id = {a.assegnazione_id: a for a in self.context.assegnazioni}
+        for docente_id, groups in groups_by_docente.items():
+            for ids in groups:
+                members = sorted(ids)
+                rep = asg_by_id[members[0]]  # x of every member of the group is the same
+                nomi = " + ".join(sorted(classe_nomi.get(asg_by_id[m].classe_id, m) for m in members))
+                for giorno in range(5):
+                    for ora in range(5):
+                        k1 = (rep.assegnazione_id, giorno, ora)
+                        k2 = (rep.assegnazione_id, giorno, ora + 1)
+                        if k1 not in self.x or k2 not in self.x:
+                            continue
+                        both = self.model.NewBoolVar(f"paired_consec_{rep.assegnazione_id}_{giorno}_{ora}")
+                        self.model.AddBoolAnd([self.x[k1], self.x[k2]]).OnlyEnforceIf(both)
+                        self.model.AddBoolOr([self.x[k1].Not(), self.x[k2].Not()]).OnlyEnforceIf(both.Not())
+                        self.soft_penalties.append(SoftPenalty(
+                            var=both, weight=weight, kind="paired_consecutive",
+                            description=(
+                                f"{rep.docente_nome} fa ore consecutive con la stessa coppia "
+                                f"({nomi}, {GIORNI_NOMI_IT[GiornoEnum(giorno).name]})"
+                            ),
+                            docente_id=docente_id, classe_id=rep.classe_id, giorno=giorno, ora=8 + ora + 1,
+                        ))
 
     def solve_fixed(self, assigned_keys: Set[Tuple[str, int, int]], timeout_seconds: int = 10) -> str:
         """

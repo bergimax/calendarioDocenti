@@ -303,3 +303,75 @@ def test_scaling_hits_only_the_entity_of_the_lesson(client, school_setup):
     assert now[(a, True)]["ore_erogate"] == 2   # singola della stessa classe: 2 ore
     assert now[(b, False)]["ore_erogate"] == 0  # la classe partner non c'entra
     assert now[(a, False)]["ore_totali"] == 40 and now[(a, True)]["ore_totali"] == 25
+
+
+def test_group_rows_share_the_same_hours(client, school_setup):
+    """Le classi di un gruppo in coppia hanno gli stessi residui: aggiungerne una al gruppo
+    già assegnato, o allineare dati vecchi, li porta tutti allo stesso valore (il più alto)."""
+    from app.database import SessionLocal
+    from app.models import MonteOreAnnuale
+    from app.services.tipo_lezione import allinea_residui_coppie, tipo_materie
+
+    docente_id = next(iter(school_setup["teachers_by_name"].values()))
+    classi = [client.post("/api/classes", json={"nome": f"6{x}"}).json()["classe_id"] for x in "ABC"]
+    client.post("/api/class-pairings", json={"classi_ids": ",".join(classi), "docente_id": docente_id})
+    pid = next(p["pairing_id"] for p in client.get("/api/class-pairings").json() if p["classe_a_id"] in classi)
+
+    client.post("/api/assignments", json={"docente_id": docente_id, "accoppiamento_id": pid, "ore_totali": "40"})
+    assert {x["ore_totali"] for x in client.get("/api/assignments").json() if x["classe_id"] in classi} == {40}
+
+    # dati "vecchi": valori diversi e un monte ore mancante
+    db = SessionLocal()
+    try:
+        coppia, _ = tipo_materie(db, "sch_1")
+        righe = {m.classe_id: m for m in db.query(MonteOreAnnuale).filter(
+            MonteOreAnnuale.docente_id == docente_id, MonteOreAnnuale.classe_id.in_(classi),
+            MonteOreAnnuale.materia_id == coppia)}
+        righe[classi[0]].ore_totali, righe[classi[0]].ore_erogate = 35, 3
+        righe[classi[1]].ore_totali, righe[classi[1]].ore_erogate = 105, 9
+        db.delete(righe[classi[2]])
+        db.commit()
+        assert allinea_residui_coppie(db, "sch_1") == 2  # la classe a 35 ore e quella senza monte
+        db.commit()
+        assert allinea_residui_coppie(db, "sch_1") == 0  # idempotente
+    finally:
+        db.close()
+    rows = [x for x in client.get("/api/assignments").json() if x["classe_id"] in classi]
+    assert {(x["ore_totali"], x["ore_erogate"]) for x in rows} == {(105, 9)}
+
+
+def test_scaling_a_joint_lesson_goes_down_once_for_the_whole_group(client, school_setup):
+    """Se una classe del gruppo non ha la sua lezione, il monte della coppia scala comunque di
+    una sola ora per lezione doppia, uguale per tutte le classi."""
+    from datetime import date
+    from app.database import SessionLocal
+    from app.models import OrarioSettimanale, SlotLezione
+    from app.services.schedule import ScheduleService
+    from app.services.tipo_lezione import tipo_materie
+
+    docente_id = next(iter(school_setup["teachers_by_name"].values()))
+    classi = [client.post("/api/classes", json={"nome": f"7{x}"}).json()["classe_id"] for x in "AB"]
+    client.post("/api/class-pairings", json={"classi_ids": ",".join(classi), "docente_id": docente_id})
+    pid = next(p["pairing_id"] for p in client.get("/api/class-pairings").json() if p["classe_a_id"] in classi)
+    client.post("/api/assignments", json={"docente_id": docente_id, "accoppiamento_id": pid, "ore_totali": "50"})
+
+    db = SessionLocal()
+    try:
+        coppia, _ = tipo_materie(db, "sch_1")
+        orario = OrarioSettimanale(scuola_id="sch_1", settimana_inizio=date(2026, 3, 9))
+        db.add(orario)
+        db.flush()
+        # 3 ore doppie, ma la classe B ha registrato solo 2 delle 3 lezioni
+        for ora in range(3):
+            for classe in classi if ora < 2 else classi[:1]:
+                db.add(SlotLezione(
+                    orario_settimanale_id=orario.id, classe_id=classe, docente_id=docente_id, materia_id=coppia,
+                    giorno="LUNEDI", ora_inizio=8 + ora, ora_fine=9 + ora, accoppiata=True,
+                ))
+        db.flush()
+        ScheduleService(db).scale_monte_ore("sch_1", orario)
+        db.commit()
+    finally:
+        db.close()
+    rows = [x for x in client.get("/api/assignments").json() if x["classe_id"] in classi]
+    assert {x["ore_erogate"] for x in rows} == {3}

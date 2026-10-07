@@ -4,6 +4,7 @@ from typing import Dict, Any, List, Optional
 from app.repositories.schedule import ScheduleRepository
 from app.domain.solver import ScheduleSolver
 from app.schemas import ScheduleGenerateResponse, SlotLezioneResponse
+import collections
 import logging
 import re
 
@@ -799,36 +800,57 @@ class ScheduleService:
 
     def scale_monte_ore(self, scuola_id: str, orario) -> Dict[str, int]:
         """
-        Add every lesson of `orario` as 1 delivered hour to ore_erogate of its
-        assegnazione (classe + docente + tipo: in coppia o singola). Does not commit and does not
-        check whether the week was already scaled: callers (approve_schedule,
-        scripts/backfill_ore_erogate.py) own that.
+        Add the lessons of `orario` as delivered hours to ore_erogate, aimed at the entity they
+        belong to (docente + classe + tipo). Does not commit and does not check whether the week
+        was already scaled: callers (approve_schedule, scripts/backfill_ore_erogate.py) own that.
+
+        A joint lesson (in coppia) counts ONCE for the whole group of classi: the group shares one
+        monte ore (its rows are kept equal), so every row of the group goes down by the number of
+        distinct joint hours, never one classe more than another. A "singola" lesson only scales the
+        monte ore of its own classe.
         """
         from sqlalchemy import func
         from app.models import SlotLezione, MonteOreAnnuale
+        from app.services.tipo_lezione import gruppi_coppia, tipo_materie
 
-        # Lessons held this week per (classe, materia, docente).
-        rows = (
-            self.db.query(
-                SlotLezione.classe_id, SlotLezione.materia_id, SlotLezione.docente_id,
-                func.count(SlotLezione.id),
-            )
-            .filter(SlotLezione.orario_settimanale_id == orario.id)
-            .group_by(SlotLezione.classe_id, SlotLezione.materia_id, SlotLezione.docente_id)
-            .all()
-        )
+        coppia_id, _ = tipo_materie(self.db, scuola_id)
+        slots = self.db.query(SlotLezione).filter(SlotLezione.orario_settimanale_id == orario.id).all()
+
+        # (docente, classe, materia) -> ore da aggiungere
+        da_scalare: Dict[tuple, int] = {}
+
+        joint: Dict[str, List[Any]] = {}
+        for s in slots:
+            if s.materia_id == coppia_id:
+                joint.setdefault(s.docente_id, []).append(s)
+        for docente_id, lezioni in joint.items():
+            gruppi = gruppi_coppia(self.db, scuola_id, docente_id)
+            visti = set()
+            for gruppo in gruppi:
+                ore = {(s.giorno, s.ora_inizio) for s in lezioni if s.classe_id in gruppo}
+                for classe_id in gruppo:
+                    da_scalare[(docente_id, classe_id, coppia_id)] = len(ore)
+                visti.update(gruppo)
+            # lezioni "in coppia" di una classe senza accoppiamento del docente: per classe
+            per_classe = collections.Counter(s.classe_id for s in lezioni if s.classe_id not in visti)
+            for classe_id, n in per_classe.items():
+                da_scalare[(docente_id, classe_id, coppia_id)] = n
+        for (classe_id, materia_id, docente_id), n in collections.Counter(
+            (s.classe_id, s.materia_id, s.docente_id) for s in slots if s.materia_id != coppia_id
+        ).items():
+            da_scalare[(docente_id, classe_id, materia_id)] = n
+
         ore_scalate = 0
         aggiornate = 0
         senza_monte = 0
-        for classe_id, materia_id, docente_id, n in rows:
+        for (docente_id, classe_id, materia_id), n in da_scalare.items():
             monte = self.db.query(MonteOreAnnuale).filter_by(
-                scuola_id=scuola_id, classe_id=classe_id,
-                materia_id=materia_id, docente_id=docente_id,
+                scuola_id=scuola_id, classe_id=classe_id, materia_id=materia_id, docente_id=docente_id,
             ).first()
             if not monte:
                 senza_monte += 1
                 logger.warning(
-                    f"No monte ore row for classe {classe_id} / materia {materia_id} / "
+                    f"No monte ore row for classe {classe_id} / tipo {materia_id} / "
                     f"docente {docente_id}: {n}h not scaled"
                 )
                 continue

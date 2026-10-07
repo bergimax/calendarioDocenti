@@ -229,6 +229,23 @@ class SchoolDataService:
         if not (docente_id and all(classe_ids)):
             raise ValueError("docente_id and classe_id are required")
 
+        # Le classi di un gruppo in coppia hanno lo stesso monte ore (una lezione doppia consuma una
+        # sola volta quello della coppia): se si aggiunge una classe a un gruppo già assegnato, tutte
+        # prendono il valore indicato; se non è indicato, la nuova copia quello del gruppo (il più alto).
+        ore_indicate = {k: _int_or(data.get(k), None) for k in ("ore_totali", "ore_erogate")}
+        gruppo_monte = []
+        if accoppiamento_id:
+            gruppo_monte = self.db.query(MonteOreAnnuale).filter(
+                MonteOreAnnuale.scuola_id == scuola_id, MonteOreAnnuale.docente_id == docente_id,
+                MonteOreAnnuale.materia_id == materia_id, MonteOreAnnuale.classe_id.in_(classe_ids),
+            ).all()
+        ore_totali = ore_indicate["ore_totali"] if ore_indicate["ore_totali"] is not None else max(
+            [m.ore_totali or 0 for m in gruppo_monte] or [0])
+        ore_erogate = ore_indicate["ore_erogate"] if ore_indicate["ore_erogate"] is not None else max(
+            [m.ore_erogate or 0 for m in gruppo_monte] or [0])
+        for m in gruppo_monte:
+            m.ore_totali, m.ore_erogate = ore_totali, ore_erogate
+
         created = []
         for classe_id in classe_ids:
             trio = dict(scuola_id=scuola_id, docente_id=docente_id, classe_id=classe_id, materia_id=materia_id)
@@ -236,11 +253,8 @@ class SchoolDataService:
                 continue  # già assegnata (stesso docente, classe e tipo): non duplicare
             asg = Assegnazione(singola=singola, **trio)
             self.db.add(asg)
-            self.db.add(MonteOreAnnuale(
-                **trio,
-                ore_totali=_int_or(data.get("ore_totali"), 0) or 0,
-                ore_erogate=_int_or(data.get("ore_erogate"), 0) or 0,
-            ))
+            if not any(m.classe_id == classe_id for m in gruppo_monte):
+                self.db.add(MonteOreAnnuale(**trio, ore_totali=ore_totali, ore_erogate=ore_erogate))
             created.append(asg)
         if not created:
             raise ValueError("Questa assegnazione esiste già per il docente")

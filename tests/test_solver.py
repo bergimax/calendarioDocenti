@@ -514,3 +514,33 @@ def test_contractor_can_give_joint_lessons():
     solver.build_model()
     assert solver.solve(timeout_seconds=30) in ("OPTIMAL", "FEASIBLE")
     assert [s for s in solver.extract_solution() if s["docente_id"] == "d1"], "il contratto deve poter fare le coppie"
+
+
+def _group_ctx(n_classi=3):
+    """Un docente in coppia con n classi (n(n-1)/2 righe di accoppiamento) + un singolo per classe."""
+    ids = [f"c{i}" for i in range(n_classi)]
+    ass = [
+        AssegnazioneDati(f"g{i}", "d1", "Prof Rossi", "ASSUNTO", c, f"1{c}", "m1", "Pratica",
+                         "TEORIA", "ALTO", ore_residue=120)
+        for i, c in enumerate(ids)
+    ]
+    for i, c in enumerate(ids):
+        ass.append(AssegnazioneDati(f"s{i}", f"x{i}", f"Prof {i}", "ASSUNTO", c, f"1{c}", "m2", "Altro",
+                                    "TEORIA", "ALTO", ore_residue=240))
+    pairs = [(a, b, "m1", "d1") for i, a in enumerate(ids) for b in ids[i + 1:]]
+    return _minimal_context(
+        assegnazioni=ass, classi_accoppiate=pairs, classi_set=set(ids),
+        docenti_map={"d1": "ASSUNTO", **{f"x{i}": "ASSUNTO" for i in range(n_classi)}},
+        materie_map={"m1": "TEORIA", "m2": "TEORIA"},
+    )
+
+
+def test_joint_lesson_counts_once_for_target_and_continuity():
+    """Una lezione doppia conta 1: l'obiettivo di ore è uno per gruppo (non uno per lato) e la
+    penalità di continuità è una per gruppo di classi (3 classi = 3 righe di accoppiamento)."""
+    solver = ScheduleSolver(_group_ctx(3))
+    solver.build_model()
+    targets = [p for p in solver.soft_penalties if p.kind == "ore_target_deviation" and p.docente_id == "d1"]
+    assert len(targets) == 1, f"un obiettivo per gruppo, non uno per classe: {len(targets)}"
+    consecutive = [p for p in solver.soft_penalties if p.kind == "paired_consecutive"]
+    assert len(consecutive) == 5 * 5, f"una penalità per gruppo, giorno e coppia di ore: {len(consecutive)}"
