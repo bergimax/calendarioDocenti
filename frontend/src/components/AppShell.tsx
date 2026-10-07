@@ -39,7 +39,7 @@ export function AppShell({
           </div>
           <div>
             <div className="font-display text-sm font-semibold leading-none">Orario</div>
-            <div className="label-mono mt-1">Istituto</div>
+            <div className="label-mono mt-1">Agenzia Don Tedoldi</div>
           </div>
         </div>
         <nav className="space-y-0.5 p-3 text-sm">
@@ -61,7 +61,6 @@ export function AppShell({
             </div>
             <div className="min-w-0 flex-1">
               <div className="truncate text-xs font-semibold">{segreteria ? "Segreteria" : "Amministratore"}</div>
-              <div className="label-mono">{segreteria ? "Sola lettura" : "School Admin"}</div>
             </div>
           </div>
           <Link

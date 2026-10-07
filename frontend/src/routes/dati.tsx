@@ -21,12 +21,11 @@ export const Route = createFileRoute("/dati")({
 });
 
 const TABS = [
-  { to: "/dati", label: "Riepilogo", exact: true },
-  { to: "/dati/calendario", label: "Calendario", exact: false },
-  { to: "/dati/docenti", label: "Docenti", exact: false },
-  { to: "/dati/classi", label: "Classi", exact: false },
-  { to: "/dati/assegnazioni", label: "Assegnazioni", exact: false },
-  { to: "/dati/accoppiamenti", label: "Accoppiamenti", exact: false },
+  { to: "/dati/calendario", label: "Calendario" },
+  { to: "/dati/docenti", label: "Docenti" },
+  { to: "/dati/classi", label: "Classi" },
+  { to: "/dati/assegnazioni", label: "Assegnazioni" },
+  { to: "/dati/accoppiamenti", label: "Accoppiamenti" },
 ] as const;
 
 function DataLayout() {
@@ -37,7 +36,6 @@ function DataLayout() {
           <Link
             key={t.to}
             to={t.to}
-            activeOptions={{ exact: t.exact }}
             className="rounded-md px-3 py-1.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-accent/50"
             activeProps={{ className: "bg-brand text-primary-foreground font-semibold" }}
           >

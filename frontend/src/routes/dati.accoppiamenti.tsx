@@ -23,6 +23,7 @@ function PairingsPage() {
       title="Accoppiamenti classi"
       endpoint="/api/class-pairings"
       idKey="pairing_id"
+      newTitle="Nuovo accoppiamento"
       emptyHint="Nessun accoppiamento restituito dal server."
       columns={[
         { key: "a", header: "Classe A", render: (r) => className(r.classe_a_id) },

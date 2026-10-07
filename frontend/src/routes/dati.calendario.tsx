@@ -16,6 +16,7 @@ function CalendarPage() {
       title="Calendario annuale"
       endpoint="/api/calendar"
       idKey="date_id"
+      newTitle="Nuovo giorno a calendario"
       emptyHint="Nessuna data restituita dal server."
       columns={[
         { key: "data", header: "Data", render: (r) => r.data },

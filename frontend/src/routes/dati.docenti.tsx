@@ -13,6 +13,7 @@ function TeachersPage() {
       title="Docenti"
       endpoint="/api/teachers"
       idKey="teacher_id"
+      newTitle="Nuovo docente"
       emptyHint="Nessun docente restituito dal server."
       columns={[
         { key: "nome", header: "Nome", render: (r) => r.nome },

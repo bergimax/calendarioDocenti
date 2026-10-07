@@ -13,6 +13,7 @@ function ClassesPage() {
       title="Classi"
       endpoint="/api/classes"
       idKey="classe_id"
+      newTitle="Nuova classe"
       emptyHint="Nessuna classe restituita dal server."
       columns={[{ key: "nome", header: "Classe", render: (r) => r.nome }]}
       form={({ value, set }) => (
