@@ -17,6 +17,7 @@ QUICK_ACTIONS = {
     "authorize_single_classe_day",
     "authorize_friday_late_start",
     "authorize_short_pratica_block",
+    "authorize_paired_hours",
 }
 
 
@@ -249,17 +250,22 @@ class ScheduleService:
             if (c.get("classe_id") or c.get("docente_id")) and not c.get("ore")
         ]
 
+        def is_classe(s: Dict[str, Any], classe_id) -> bool:
+            # Una lezione accoppiata appartiene a entrambe le classi: il suo
+            # conflitto/avviso evidenzia la cella di tutte e due, non solo di una.
+            return bool(classe_id) and classe_id in (s.get("classe_id"), s.get("classe_accoppiata_id"))
+
         def in_scope(s: Dict[str, Any], classe_id, docente_id, giorno, ore_slot=None) -> bool:
             if ore_slot:
                 # a forced lesson's conflict: only the lessons at those hours
                 return s.get("giorno") == giorno and s.get("ora_inizio") in ore_slot and (
-                    (classe_id and s.get("classe_id") == classe_id)
+                    is_classe(s, classe_id)
                     or (docente_id and s.get("docente_id") == docente_id)
                 )
             if giorno:
                 # a day-scoped conflict: any lesson of that classe or docente that day
                 return s.get("giorno") == giorno and (
-                    (classe_id and s.get("classe_id") == classe_id)
+                    is_classe(s, classe_id)
                     or (docente_id and s.get("docente_id") == docente_id)
                 )
             # no day (e.g. a docente's weekly hours off target in one classe):
@@ -267,7 +273,7 @@ class ScheduleService:
             # there is no sensible cell to point at, so leave it unmarked.
             return bool(
                 classe_id and docente_id
-                and s.get("classe_id") == classe_id and s.get("docente_id") == docente_id
+                and is_classe(s, classe_id) and s.get("docente_id") == docente_id
             )
 
         avvisi = {c.get("chiave") for c in conflicts if c.get("avviso")}

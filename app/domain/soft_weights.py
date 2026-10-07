@@ -64,6 +64,10 @@ MOTIVO_CONSTRAINTS: Dict[str, MotivoConstraint] = {
         ("friday_late_start_override",), None,
         "Relaxable-hard: fix with authorize_friday_late_start, not a weight.",
     ),
+    "paired_hours": MotivoConstraint(
+        ("paired_hours_override",), None,
+        "Relaxable-hard: fix with authorize_paired_hours, not a weight.",
+    ),
     "pratica_block": MotivoConstraint(
         ("pratica_block_override",), None,
         "Relaxable-hard: fix with authorize_short_pratica_block, not a weight.",

@@ -144,6 +144,12 @@ const QUICK_ACTIONS: {
     fields: ["classe"],
   },
   {
+    action_type: "authorize_paired_hours",
+    label: "Autorizza più ore in coppia",
+    description: "Permette a un docente di avere più di un'ora al giorno con classi accoppiate.",
+    fields: ["docente", "giorno"],
+  },
+  {
     action_type: "authorize_short_pratica_block",
     label: "Autorizza blocco pratica corto",
     description:

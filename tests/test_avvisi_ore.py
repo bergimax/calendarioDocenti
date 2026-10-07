@@ -29,3 +29,15 @@ def test_real_conflict_stays_red_even_with_an_avviso_on_the_same_cell():
     assert slots[0]["conflitto"] is True
     assert slots[0]["avviso"] is False
     assert set(slots[0]["conflitto_chiavi"]) == {"k1", "k2"}
+
+
+def test_paired_lesson_highlights_both_classes():
+    """Conflitto/avviso di una classe accoppiata: evidenziate le celle di entrambe le classi."""
+    slots = [
+        {"classe_id": "c1", "classe_accoppiata_id": "c2", "docente_id": "d1", "giorno": "LUNEDI", "ora_inizio": 8},
+        {"classe_id": "c2", "classe_accoppiata_id": "c1", "docente_id": "d1", "giorno": "LUNEDI", "ora_inizio": 8},
+        {"classe_id": "c3", "docente_id": "d2", "giorno": "LUNEDI", "ora_inizio": 8},
+    ]
+    # avviso sulla sola classe c2 (ore del docente d1 in c2)
+    ScheduleService._mark_slot_conflicts(slots, [_conflict("ore_target_deviation", "k1", True, classe_id="c2")])
+    assert [s["avviso"] for s in slots] == [True, True, False]

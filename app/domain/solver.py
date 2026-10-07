@@ -134,7 +134,7 @@ class SoftPenalty:
     """
     var: Any  # cp_model IntVar; > 0 in the solution means this is violated
     weight: int
-    kind: str  # "teoria_consecutive" | "ore_target_deviation" | "contractor_gap" | "classe_late_start" | "availability_override" | "single_classe_day" | "friday_late_start_override" | "pratica_block_override" | "classe_day_cap_override"
+    kind: str  # "teoria_consecutive" | "ore_target_deviation" | "contractor_gap" | "classe_late_start" | "availability_override" | "single_classe_day" | "friday_late_start_override" | "pratica_block_override" | "paired_hours_override" | "classe_day_cap_override"
     description: str
     classe_id: Optional[str] = None
     docente_id: Optional[str] = None
@@ -294,6 +294,11 @@ class ScheduleSolver:
         # none at all (relaxable at an extreme weight, see
         # _constraint_pratica_block_min_3h's docstring)
         self._constraint_pratica_block_min_3h()
+
+        # Hard 2f: a docente never has more than 1 joint (paired-classes) hour
+        # per day (relaxable at an extreme weight, see
+        # _constraint_max_one_paired_hour_per_day's docstring)
+        self._constraint_max_one_paired_hour_per_day()
 
         # Hard 3: Paired classes
         self._constraint_paired_classes()
@@ -579,6 +584,72 @@ class ScheduleSolver:
                     "label": "Autorizza inizio posticipato di venerdì",
                 },
             ))
+
+    def _constraint_max_one_paired_hour_per_day(self) -> None:
+        """
+        Hard 2f, relaxable: a docente teaches AT MOST ONE joint hour (the same
+        lesson given to both classes of a classe-accoppiata) per day. One joint
+        hour plus other hours with a single classe is fine; two joint hours in
+        the same day never, unless the admin explicitly allows it.
+
+        Rotation falls out of it: when the same pair is covered by several
+        docenti (one pairing row each), the solver spreads the joint hours
+        across them instead of stacking two on the same docente.
+
+        Modeled like _constraint_friday_start_at_8: an override bool per
+        (docente, giorno) at RELAX_WEIGHT, so it is only broken when there
+        is truly no other way, and every forced break is surfaced by
+        get_conflicts() with the "authorize_paired_hours" deroga - never a
+        silent change.
+        """
+        RELAX_WEIGHT = 1000
+
+        # docente -> [assegnazione of the "A" side of each of its pairs]; x_a == x_b
+        # (_constraint_paired_classes), so x_a alone is "a joint lesson happens".
+        joint_by_docente: Dict[str, List["AssegnazioneDati"]] = {}
+        for classe_a, classe_b, materia_id, docente_id in self.context.classi_accoppiate:
+            pair = self._paired_assignment_pair(classe_a, classe_b, materia_id, docente_id)
+            if not pair:
+                continue
+            asgs = joint_by_docente.setdefault(docente_id, [])
+            if pair[0] not in asgs:
+                asgs.append(pair[0])
+
+        for docente_id, asgs in joint_by_docente.items():
+            for giorno in range(5):
+                if self._deroga_active("authorize_paired_hours", docente_id=docente_id, giorno=giorno):
+                    continue
+                # One variable per HOUR: with 3+ classes chained together (A+B, A+C)
+                # all the x_a of that hour are equal, and it is still ONE joint hour.
+                joint = []
+                for ora in range(6):
+                    xs = [
+                        self.x[(a.assegnazione_id, giorno, ora)]
+                        for a in asgs if (a.assegnazione_id, giorno, ora) in self.x
+                    ]
+                    if len(xs) == 1:
+                        joint.append(xs[0])
+                    elif xs:
+                        hour_joint = self.model.NewBoolVar(f"paired_hour_{docente_id}_{giorno}_{ora}")
+                        self.model.AddMaxEquality(hour_joint, xs)
+                        joint.append(hour_joint)
+                if len(joint) < 2:
+                    continue
+                relax = self.model.NewBoolVar(f"paired_hours_override_{docente_id}_{giorno}")
+                self.model.Add(sum(joint) <= 1).OnlyEnforceIf(relax.Not())
+                self.soft_penalties.append(SoftPenalty(
+                    var=relax, weight=RELAX_WEIGHT, kind="paired_hours_override",
+                    description=(
+                        f"{asgs[0].docente_nome} ha più di un'ora con classi accoppiate "
+                        f"({GIORNI_NOMI_IT[GiornoEnum(giorno).name]}): "
+                        "nessun'altra combinazione di docenti era possibile"
+                    ),
+                    docente_id=docente_id, giorno=giorno,
+                    suggested_action={
+                        "action_type": "authorize_paired_hours",
+                        "label": "Autorizza più ore in coppia",
+                    },
+                ))
 
     def _constraint_day_capacity(self) -> None:
         """Hard constraint 2: a class's daily hours must equal

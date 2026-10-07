@@ -410,3 +410,57 @@ def test_contractor_penalties_scale_with_scarcity_of_availability():
     assert scarcity(little) > scarcity(full)
     # not a contractor -> neutral
     assert ScheduleSolver(_minimal_context())._contractor_scarcity("d1") == 1.0
+
+
+def _paired_hours_ctx(**overrides):
+    """Due docenti coprono la stessa coppia c1+c2 in comune (una riga di accoppiamento
+    ciascuno); altri due docenti tengono una classe ciascuno e riempiono il resto."""
+    ass = []
+    for did, nome in (("d1", "Prof Rossi"), ("d2", "Prof Verdi")):
+        ass.append(AssegnazioneDati(f"{did}a", did, nome, "ASSUNTO", "c1", "1A", "m1", "Pratica",
+                                    "TEORIA", "ALTO", ore_residue=60))
+        ass.append(AssegnazioneDati(f"{did}b", did, nome, "ASSUNTO", "c2", "1B", "m1", "Pratica",
+                                    "TEORIA", "ALTO", ore_residue=60))
+    # due docenti singoli (uno per classe: un docente non può stare in due classi insieme)
+    for cid, cn, did in (("c1", "1A", "d3"), ("c2", "1B", "d4")):
+        ass.append(AssegnazioneDati(f"{did}{cid}", did, f"Prof {did}", "ASSUNTO", cid, cn, "m2", "Italiano",
+                                    "TEORIA", "ALTO", ore_residue=240))
+    return _minimal_context(
+        assegnazioni=ass,
+        classi_accoppiate=[("c1", "c2", "m1", "d1"), ("c1", "c2", "m1", "d2")],
+        classi_set={"c1", "c2"},
+        docenti_map={"d1": "ASSUNTO", "d2": "ASSUNTO", "d3": "ASSUNTO", "d4": "ASSUNTO"},
+        materie_map={"m1": "TEORIA", "m2": "TEORIA"},
+        **overrides,
+    )
+
+
+def test_docente_never_has_more_than_one_paired_hour_per_day():
+    solver = ScheduleSolver(_paired_hours_ctx())
+    solver.build_model()
+    assert solver.solve(timeout_seconds=30) in ("OPTIMAL", "FEASIBLE")
+
+    joint = {}
+    for s in solver.extract_solution():
+        if s.get("classe_accoppiata_id") and s["classe_id"] == "c1":
+            joint[(s["docente_id"], s["giorno"])] = joint.get((s["docente_id"], s["giorno"]), 0) + 1
+    assert joint, "la coppia deve avere ore in comune"
+    assert max(joint.values()) == 1, f"un docente ha più ore in coppia nello stesso giorno: {joint}"
+    assert not [c for c in solver.get_conflicts() if c["kind"] == "paired_hours_override"]
+
+
+def test_paired_hours_cap_is_relaxed_only_with_a_visible_conflict():
+    """Se solo un docente può coprire la coppia, il limite si rompe ma ogni rottura
+    è un conflitto con la deroga suggerita (mai silenziosa)."""
+    ass = [
+        AssegnazioneDati("a1", "d1", "Prof Rossi", "ASSUNTO", "c1", "1A", "m1", "Pratica", "TEORIA", "ALTO", ore_residue=30),
+        AssegnazioneDati("a2", "d1", "Prof Rossi", "ASSUNTO", "c2", "1B", "m1", "Pratica", "TEORIA", "ALTO", ore_residue=30),
+    ]
+    ctx = _minimal_context(
+        assegnazioni=ass, classi_accoppiate=[("c1", "c2", "m1", "d1")], classi_set={"c1", "c2"},
+    )
+    solver = ScheduleSolver(ctx)
+    solver.build_model()
+    assert solver.solve(timeout_seconds=30) in ("OPTIMAL", "FEASIBLE")
+    conflicts = [c for c in solver.get_conflicts() if c["kind"] == "paired_hours_override"]
+    assert conflicts and all(c["suggested_action"]["action_type"] == "authorize_paired_hours" for c in conflicts)
