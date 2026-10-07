@@ -320,19 +320,31 @@ class ScheduleService:
         return result
 
     def assignable_for_classe(self, scuola_id: str, week_start: date, classe_id: str) -> List[Dict[str, Any]]:
-        """The docente/materia pairs assigned to a classe (what can be put in one of its free hours)."""
+        """
+        What can be put in a free hour of the classe: every assegnazione of the classe, so the same
+        docente can be chosen "in coppia" (the lesson goes to all the classi of the group, which are
+        listed in `partner_classi`) or "singola" (only this classe).
+        """
+        from app.services.tipo_lezione import gruppi_coppia, tipo_materie
+
         context = self.repo.get_week_context(scuola_id, week_start)
-        return sorted(
-            (
-                {
-                    "docente_id": a.docente_id, "docente_nome": a.docente_nome,
-                    "materia_id": a.materia_id, "materia_nome": a.materia_nome,
-                    "ore_residue": a.ore_residue,
-                }
-                for a in context.assegnazioni if a.classe_id == classe_id
-            ),
-            key=lambda r: (r["docente_nome"] or "", r["materia_nome"] or ""),
-        )
+        coppia_id, _ = tipo_materie(self.db, scuola_id)
+        classe_nomi = {a.classe_id: a.classe_nome for a in context.assegnazioni}
+        out = []
+        for a in context.assegnazioni:
+            if a.classe_id != classe_id:
+                continue
+            partner = []
+            if a.materia_id == coppia_id:
+                for gruppo in gruppi_coppia(self.db, scuola_id, a.docente_id):
+                    if classe_id in gruppo:
+                        partner = [classe_nomi.get(c, c) for c in gruppo if c != classe_id]
+            out.append({
+                "docente_id": a.docente_id, "docente_nome": a.docente_nome,
+                "materia_id": a.materia_id, "materia_nome": a.materia_nome,
+                "ore_residue": a.ore_residue, "partner_classi": partner,
+            })
+        return sorted(out, key=lambda r: (r["docente_nome"] or "", r["materia_nome"] or ""))
 
     def _day_max_violation(self, context, classe_id: str, giorno: str, count_after: int) -> Optional[str]:
         """
@@ -357,7 +369,7 @@ class ScheduleService:
 
     def assign_slot(
         self, scuola_id: str, week_start: date, classe_id: str, giorno: str, ora_inizio: int,
-        docente_id: str, materia_id: str, confirm: bool = False,
+        docente_id: str, materia_id: str, confirm: bool = False, replace: bool = False,
     ) -> Dict[str, Any]:
         """
         Manual assignment ("forzatura") of a lesson to a free hour. If it would
@@ -417,19 +429,18 @@ class ScheduleService:
 
         slots = list(orario.slot_lezioni)
         at_hour = [s for s in slots if s.giorno == giorno and s.ora_inizio == ora_inizio]
-        if any(s.classe_id == classe_id for s in at_hour):
-            return {"status": "error", "message": "Quest'ora ha già una lezione: modificala dal pannello."}
+        if not replace and any(s.classe_id == classe_id for s in at_hour):
+            return {"status": "error", "message": "Quest'ora ha già una lezione: sostituiscila o rimuovila dal pannello."}
 
         to_remove: List[Any] = []
         replaced: List[str] = []
         to_add: List[str] = []  # classe ids that get the new lesson
+        skipped: List[str] = []
         for c in sorted(group):
             if (c, docente_id, materia_id) not in asg_of:
-                return {
-                    "status": "error",
-                    "message": f"La classe {classe_nomi.get(c, c)} (accoppiata) non ha questa materia "
-                               "assegnata a questo docente.",
-                }
+                # forzatura: la classe accoppiata senza questa assegnazione resta fuori dalla lezione
+                skipped.append(classe_nomi.get(c, c))
+                continue
             existing = next((s for s in at_hour if s.classe_id == c), None)
             if existing is None:
                 to_add.append(c)
@@ -444,16 +455,6 @@ class ScheduleService:
                         replaced.append(f"{classe_nomi.get(j.classe_id, j.classe_id)} "
                                         f"({j.docente.nome if j.docente else j.docente_id})")
                 to_add.append(c)
-
-        # The day's maximum hours cannot be forced: explain why instead.
-        for c in to_add:
-            after = sum(
-                1 for s in slots
-                if s.classe_id == c and s.giorno == giorno and s not in to_remove
-            ) + 1
-            reason = self._day_max_violation(context, c, giorno, after)
-            if reason:
-                return {"status": "error", "message": reason}
 
         assigned_keys = set()
         for s in slots:
@@ -473,27 +474,29 @@ class ScheduleService:
                 "message": "Assegnazione non possibile: viola una regola non derogabile del modello.",
             }
 
-        # Which rules does this assignment force? Conflicts that the schedule does not
-        # have yet, about this docente or the classi of the lesson (ore in più/in meno are
-        # warnings, not rules, so they never need confirmation).
-        if not confirm:
-            after = self._apply_handled(orario.id, solver.get_conflicts())
-            candidates = [
-                c for c in after
-                if not c.get("avviso") and (c.get("docente_id") == docente_id or c.get("classe_id") in group)
-            ]
-            if candidates:
-                before = {c.get("chiave") for c in (self.get_schedule(scuola_id, week_start) or {}).get("conflicts", [])}
-                forced = [c for c in candidates if c.get("chiave") not in before]
-                if forced:
-                    return {
-                        "status": "needs_confirmation",
-                        "message": "Questa assegnazione forza delle regole: confermi?",
-                        "regole": [
-                            {"kind": c.get("kind"), "description": c["description"], "chiave": c.get("chiave")}
-                            for c in forced
-                        ],
-                    }
+        # Which rules does this assignment force? Conflicts that the schedule does not have yet,
+        # about this docente or the classi of the lesson. Ore in più/in meno (avvisi) are only
+        # reported. The outcome is always stated, also when nothing is forced.
+        after = self._apply_handled(orario.id, solver.get_conflicts())
+        relevant = [
+            c for c in after
+            if c.get("docente_id") == docente_id or c.get("classe_id") in group
+        ]
+        forced, avvisi = [], []
+        if relevant:
+            before = {c.get("chiave") for c in (self.get_schedule(scuola_id, week_start) or {}).get("conflicts", [])}
+            new = [c for c in relevant if c.get("chiave") not in before]
+            forced = [c for c in new if not c.get("avviso")]
+            avvisi = [c for c in new if c.get("avviso")]
+        if forced and not confirm:
+            return {
+                "status": "needs_confirmation",
+                "message": "Questa assegnazione forza delle regole: confermi?",
+                "regole": [
+                    {"kind": c.get("kind"), "description": c["description"], "chiave": c.get("chiave")}
+                    for c in forced
+                ],
+            }
 
         quality_score, quality_level, n_conflicts = solver.calculate_quality_score()
         try:
@@ -529,12 +532,25 @@ class ScheduleService:
 
         result = self.get_schedule(scuola_id, week_start)
         notes = []
+        tipo = "in coppia" if len(group) > 1 else "singola"
+        notes.append(f"Assegnata {tipo}")
+        if forced:
+            notes.append("Regole forzate: " + "; ".join(c["description"] for c in forced))
+        else:
+            notes.append("Nessuna regola forzata")
+        if avvisi:
+            notes.append("Avvisi: " + "; ".join(c["description"] for c in avvisi))
+        if skipped:
+            notes.append("Non assegnata a (manca l'assegnazione del docente): " + ", ".join(skipped))
         if len(to_add) > 1:
             notes.append("Assegnata anche alle classi accoppiate: " + ", ".join(
                 classe_nomi.get(c, c) for c in to_add if c != classe_id))
         if replaced:
             notes.append("Sostituite le lezioni di: " + "; ".join(replaced))
-        result["message"] = ". ".join(notes) or None
+        result["message"] = ". ".join(notes)
+        result["regole_forzate"] = [
+            {"kind": c.get("kind"), "description": c["description"]} for c in forced
+        ]
         return result
 
     def approve_conflicts(self, scuola_id: str, week_start: date, chiavi: List[str]) -> Dict[str, Any]:

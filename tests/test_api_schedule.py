@@ -610,3 +610,77 @@ def test_assign_slot_asks_confirmation_before_forcing_a_rule(client, school_setu
     done = client.post(f"/api/schedule/{week}/assign-slot", json={**body, "confirm": True}).json()
     assert done.get("status") != "needs_confirmation" and done.get("status") != "error", done
     assert len(client.get(f"/api/schedule/{week}").json()["slots"]) == n_before
+
+
+def test_assign_slot_always_reports_forced_rules_even_when_none(client, school_setup):
+    """L'esito dell'assegnazione manuale dice sempre le regole forzate, anche "nessuna"."""
+    week = school_setup["week_start"]
+    slots = _generated_slots(client, week)
+    target = next(s for s in slots if not s["accoppiata"])
+    client.post(f"/api/schedule/{week}/conflicts/reject", json={
+        "classe_id": target["classe_id"], "giorno": target["giorno"], "ora_inizio": target["ora_inizio"],
+    })
+    done = client.post(f"/api/schedule/{week}/assign-slot", json={
+        "classe_id": target["classe_id"], "giorno": target["giorno"], "ora_inizio": target["ora_inizio"],
+        "docente_id": target["docente_id"], "materia_id": target["materia_id"], "confirm": True,
+    }).json()
+    assert done.get("status") != "error", done
+    assert done["message"].startswith("Assegnata"), done["message"]
+    assert ("Nessuna regola forzata" in done["message"]) == (done["regole_forzate"] == [])
+    assert isinstance(done["regole_forzate"], list)
+
+    # le opzioni dicono con quali classi è la coppia
+    opts = client.get(f"/api/schedule/{week}/assignable/{target['classe_id']}").json()["options"]
+    assert all("partner_classi" in o for o in opts)
+
+
+def test_manual_assignment_can_force_any_rule_and_reports_it(client, school_setup):
+    """Anche in un giorno di chiusura (prima rifiutato): si può forzare, dicendo la regola rotta."""
+    week = school_setup["week_start"]  # il lunedì della fixture è chiuso
+    slots = _generated_slots(client, week)
+    base = next(s for s in slots if not s["accoppiata"])
+    n_before = len(slots)
+    body = {
+        "classe_id": base["classe_id"], "giorno": "LUNEDI", "ora_inizio": 8,
+        "docente_id": base["docente_id"], "materia_id": base["materia_id"],
+    }
+
+    asked = client.post(f"/api/schedule/{week}/assign-slot", json=body).json()
+    assert asked["status"] == "needs_confirmation", asked
+    assert asked["regole"], "deve dire quale regola forza"
+
+    done = client.post(f"/api/schedule/{week}/assign-slot", json={**body, "confirm": True}).json()
+    assert done.get("status") != "error", done
+    assert "Regole forzate" in done["message"] and done["regole_forzate"]
+    assert len(client.get(f"/api/schedule/{week}").json()["slots"]) == n_before + 1
+
+
+def test_clicking_a_lesson_can_replace_the_docente(client, school_setup):
+    """Su una lezione già assegnata: sostituire il docente con un'altra scelta della classe."""
+    week = school_setup["week_start"]
+    slots = _generated_slots(client, week)
+    n_before = len(slots)
+    target = other = None
+    for s in (x for x in slots if not x["accoppiata"]):
+        opts = client.get(f"/api/schedule/{week}/assignable/{s['classe_id']}").json()["options"]
+        alt = next((o for o in opts if o["docente_id"] != s["docente_id"]), None)
+        if alt:
+            target, other = s, alt
+            break
+    assert other, "la fixture ha una classe con più docenti"
+    body = {
+        "classe_id": target["classe_id"], "giorno": target["giorno"], "ora_inizio": target["ora_inizio"],
+        "docente_id": other["docente_id"], "materia_id": other["materia_id"], "confirm": True,
+    }
+
+    # senza "replace" l'ora occupata non si tocca
+    refused = client.post(f"/api/schedule/{week}/assign-slot", json=body).json()
+    assert refused["status"] == "error" and "sostituiscila" in refused["message"]
+
+    done = client.post(f"/api/schedule/{week}/assign-slot", json={**body, "replace": True}).json()
+    assert done.get("status") != "error", done
+    now = client.get(f"/api/schedule/{week}").json()["slots"]
+    here = [s for s in now if s["classe_id"] == target["classe_id"] and s["giorno"] == target["giorno"]
+            and s["ora_inizio"] == target["ora_inizio"]]
+    assert [s["docente_id"] for s in here] == [other["docente_id"]]
+    assert len(now) >= n_before - 1

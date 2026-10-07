@@ -375,3 +375,34 @@ def test_scaling_a_joint_lesson_goes_down_once_for_the_whole_group(client, schoo
         db.close()
     rows = [x for x in client.get("/api/assignments").json() if x["classe_id"] in classi]
     assert {x["ore_erogate"] for x in rows} == {3}
+
+
+def test_duplicate_assignments_are_merged_and_ignored(client, school_setup):
+    """Un doppione (stesso docente, classe e tipo) non deve restare: si fonde con l'originale e,
+    finché c'è, il solver non lo vede come una seconda assegnazione."""
+    from datetime import date
+    from app.database import SessionLocal
+    from app.models import Assegnazione, MonteOreAnnuale
+    from app.repositories.schedule import ScheduleRepository
+    from app.services.tipo_lezione import tipo_materie, unisci_doppioni
+
+    docente_id = next(iter(school_setup["teachers_by_name"].values()))
+    classe = client.post("/api/classes", json={"nome": "8A"}).json()["classe_id"]
+    client.post("/api/assignments", json={"docente_id": docente_id, "classe_id": classe, "ore_totali": "20"})
+
+    db = SessionLocal()
+    try:
+        _, singola = tipo_materie(db, "sch_1")
+        db.add(Assegnazione(scuola_id="sch_1", docente_id=docente_id, classe_id=classe, materia_id=singola, singola=True))
+        db.add(MonteOreAnnuale(scuola_id="sch_1", docente_id=docente_id, classe_id=classe, materia_id=singola,
+                               ore_totali=20, ore_erogate=4))
+        db.commit()
+        ctx = ScheduleRepository(db).get_week_context("sch_1", date(2026, 4, 6))
+        assert len([a for a in ctx.assegnazioni if a.classe_id == classe]) == 1  # la copia è ignorata
+        assert unisci_doppioni(db, "sch_1") == 2  # una assegnazione + un monte ore
+        db.commit()
+        assert unisci_doppioni(db, "sch_1") == 0
+    finally:
+        db.close()
+    rows = [x for x in client.get("/api/assignments").json() if x["classe_id"] == classe]
+    assert len(rows) == 1 and rows[0]["ore_erogate"] == 4 and rows[0]["ore_totali"] == 20

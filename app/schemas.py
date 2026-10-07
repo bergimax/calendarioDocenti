@@ -236,6 +236,8 @@ class AssignSlotRequest(BaseModel):
     # False: se l'assegnazione forza regole, non salva e chiede conferma all'admin
     # (status "needs_confirmation" con l'elenco delle regole); True: l'admin ha accettato.
     confirm: bool = False
+    # True: l'ora ha già una lezione (anche in coppia) e va sostituita da questa
+    replace: bool = False
 
 
 class ApproveConflictRequest(BaseModel):

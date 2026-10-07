@@ -55,6 +55,33 @@ def gruppi_coppia(db: Session, scuola_id: str, docente_id: str) -> List[List[str
     return [sorted(c) for c in comps]
 
 
+def unisci_doppioni(db: Session, scuola_id: str) -> int:
+    """Più assegnazioni uguali (stesso docente, classe e tipo) sono la stessa entità: ne resta una
+    (la più vecchia) e i monte ore doppi si fondono al valore più alto. Un doppione rende ambigua
+    la lezione salvata e rompe l'uguaglianza delle coppie. Idempotente; ritorna le righe tolte."""
+    tolte = 0
+    per_trio: Dict[Tuple[str, str, str], List[Assegnazione]] = {}
+    for a in db.query(Assegnazione).filter_by(scuola_id=scuola_id).order_by(Assegnazione.created_at, Assegnazione.id):
+        per_trio.setdefault((a.docente_id, a.classe_id, a.materia_id), []).append(a)
+    for (docente_id, classe_id, materia_id), asgs in per_trio.items():
+        if len(asgs) > 1:
+            for extra in asgs[1:]:
+                db.delete(extra)
+                tolte += 1
+        monti = db.query(MonteOreAnnuale).filter_by(
+            scuola_id=scuola_id, docente_id=docente_id, classe_id=classe_id, materia_id=materia_id,
+        ).order_by(MonteOreAnnuale.created_at, MonteOreAnnuale.id).all()
+        if len(monti) > 1:
+            monti[0].ore_totali = max(m.ore_totali or 0 for m in monti)
+            monti[0].ore_erogate = max(m.ore_erogate or 0 for m in monti)
+            for extra in monti[1:]:
+                db.delete(extra)
+                tolte += 1
+    if tolte:
+        logger.info(f"Doppioni uniti: {tolte} righe tolte")
+    return tolte
+
+
 def allinea_residui_coppie(db: Session, scuola_id: str) -> int:
     """Le classi di un gruppo in coppia hanno lo stesso monte ore: una lezione doppia consuma
     una sola volta il monte della coppia. Allinea ore totali e ore fatte di ogni gruppo al valore
@@ -174,5 +201,7 @@ def _normalize_scuola(db: Session, sid: str) -> None:
         voluto = coppia if s.accoppiata else singola
         s.materia_id = voluto if (voluto in disponibili or not disponibili) else next(iter(disponibili))
 
+    db.flush()
+    unisci_doppioni(db, sid)
     db.flush()
     allinea_residui_coppie(db, sid)

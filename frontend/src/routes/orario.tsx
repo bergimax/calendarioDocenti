@@ -398,9 +398,11 @@ function SchedulePage() {
           onQuickAction={applyQuickAction}
           selectedSlot={selectedSlot}
           onCloseSlot={() => setSelectedSlot(null)}
-          onSlotUpdated={(s) => {
+          onSlotUpdated={(s, message) => {
             setSchedule(s);
             setSelectedSlot(null);
+            setConflictSel(null);
+            if (message) setNotice(`${message}.`);
           }}
           selectedCell={selectedCell}
           onCloseCell={() => setSelectedCell(null)}
@@ -408,7 +410,7 @@ function SchedulePage() {
             setSchedule(s);
             setSelectedCell(null);
             setConflictSel(null);
-            setNotice(message ? `Lezione assegnata. ${message}` : "Lezione assegnata.");
+            setNotice(message ? `${message}.` : "Lezione assegnata.");
           }}
         />
       }
@@ -991,7 +993,7 @@ function SidePanel({
   ) => void;
   selectedSlot: SlotLezione | null;
   onCloseSlot: () => void;
-  onSlotUpdated: (s: Schedule) => void;
+  onSlotUpdated: (s: Schedule, message?: string) => void;
   selectedCell: FreeCell | null;
   onCloseCell: () => void;
   onCellAssigned: (s: Schedule, message?: string) => void;
@@ -1095,11 +1097,14 @@ function AssignSlotPanel({
   cell,
   onClose,
   onAssigned,
+  replacing,
 }: {
   week: string;
   cell: FreeCell;
   onClose: () => void;
   onAssigned: (s: Schedule, message?: string) => void;
+  /** L'ora ha già una lezione: la scelta la sostituisce (anche i partner di una lezione in coppia). */
+  replacing?: boolean;
 }) {
   const [choice, setChoice] = useState("");
   const [busy, setBusy] = useState(false);
@@ -1117,6 +1122,7 @@ function AssignSlotPanel({
           materia_id: string;
           materia_nome: string;
           ore_residue: number;
+          partner_classi?: string[];
         }[];
       }>(`/api/schedule/${week}/assignable/${cell.classe_id}`),
     retry: false,
@@ -1139,6 +1145,7 @@ function AssignSlotPanel({
           docente_id,
           materia_id,
           confirm,
+          replace: Boolean(replacing),
         },
       });
       if (res.status === "needs_confirmation") {
@@ -1157,7 +1164,7 @@ function AssignSlotPanel({
   return (
     <div className="space-y-2 border-b border-edge px-4 py-3">
       <div className="flex items-center">
-        <span className="label-mono">Assegna ora libera</span>
+        <span className="label-mono">{replacing ? "Sostituisci il docente" : "Assegna ora libera"}</span>
         <button type="button" onClick={onClose} className="ml-auto text-[11px] text-muted-foreground">
           Chiudi
         </button>
@@ -1176,7 +1183,8 @@ function AssignSlotPanel({
       >
         {list.map((o) => (
           <option key={`${o.docente_id}|${o.materia_id}`} value={`${o.docente_id}|${o.materia_id}`}>
-            {o.docente_nome} · {o.materia_nome} ({o.ore_residue}h residue)
+            {o.docente_nome} · {o.materia_nome}
+            {o.partner_classi?.length ? ` con ${o.partner_classi.join(" + ")}` : ""} ({o.ore_residue}h residue)
           </option>
         ))}
       </Select>
@@ -1204,7 +1212,7 @@ function AssignSlotPanel({
         </div>
       ) : (
         <Button variant="primary" className="w-full" onClick={() => void submit(false)} disabled={busy || !selected}>
-          {busy ? "Controllo…" : "Assegna"}
+          {busy ? "Controllo…" : replacing ? "Sostituisci" : "Assegna"}
         </Button>
       )}
     </div>
@@ -1351,7 +1359,7 @@ function ModifySlotPanel({
   week: string;
   slot: SlotLezione;
   onClose: () => void;
-  onUpdated: (s: Schedule) => void;
+  onUpdated: (s: Schedule, message?: string) => void;
 }) {
   const [giorno, setGiorno] = useState(slot.giorno);
   const [ora, setOra] = useState(slot.ora_inizio);
@@ -1384,13 +1392,57 @@ function ModifySlotPanel({
     }
   }
 
+  async function remove() {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await api<ScheduleMutationResult>(`/api/schedule/${week}/conflicts/reject`, {
+        method: "POST",
+        body: { classe_id: slot.classe_id, giorno: slot.giorno, ora_inizio: slot.ora_inizio },
+      });
+      onUpdated(requireSchedule(res), "Lezione rimossa: l'ora resta libera");
+    } catch (err) {
+      setError(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
+    <>
     <div className="space-y-2 border-b border-edge px-4 py-3">
       <div className="flex items-center">
-        <span className="label-mono">Modifica slot</span>
+        <span className="label-mono">Lezione</span>
         <button type="button" onClick={onClose} className="ml-auto text-[11px] text-muted-foreground">
           Chiudi
         </button>
+      </div>
+      <p className="text-[11px] text-muted-foreground">
+        {slot.classe_nome} · {GIORNI.find((g) => g.value === slot.giorno)?.label ?? slot.giorno} ·{" "}
+        {String(slot.ora_inizio).padStart(2, "0")}:00 · {slot.docente_nome}
+        {slot.materia_nome ? ` (${slot.materia_nome})` : ""}
+      </p>
+      <Button className="w-full" onClick={() => void remove()} disabled={busy}>
+        Rimuovi la lezione (ora libera)
+      </Button>
+      {error ? <p className="text-[11px] text-conflict">{apiErrorMessage(error)}</p> : null}
+    </div>
+    <AssignSlotPanel
+      key={`replace-${slot.slot_id}`}
+      replacing
+      week={week}
+      cell={{
+        classe_id: slot.classe_id,
+        classe_nome: slot.classe_nome ?? slot.classe_id,
+        giorno: slot.giorno,
+        ora: slot.ora_inizio,
+      }}
+      onClose={onClose}
+      onAssigned={(s, message) => onUpdated(s, message)}
+    />
+    <div className="space-y-2 border-b border-edge px-4 py-3">
+      <div className="flex items-center">
+        <span className="label-mono">Sposta in un'altra ora o a un altro docente</span>
       </div>
       <Select label="Giorno" value={giorno} onChange={(e) => setGiorno(e.target.value)}>
         {GIORNI.map(({ value, label }) => (
@@ -1420,6 +1472,7 @@ function ModifySlotPanel({
         {busy ? "Ricalcolo…" : "Salva e ricalcola"}
       </Button>
     </div>
+    </>
   );
 }
 

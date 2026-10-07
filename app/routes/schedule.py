@@ -173,7 +173,7 @@ def assign_slot(
     try:
         return ScheduleService(db).assign_slot(
             _get_current_school_id(), week_start, request.classe_id, request.giorno.value,
-            request.ora_inizio, request.docente_id, request.materia_id, confirm=request.confirm,
+            request.ora_inizio, request.docente_id, request.materia_id, confirm=request.confirm, replace=request.replace,
         )
     except Exception as e:
         logger.error(f"Error assigning slot: {e}")

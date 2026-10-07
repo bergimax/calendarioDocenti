@@ -805,7 +805,21 @@ class ScheduleSolver:
                     key_b = (asg_b.assegnazione_id, giorno, ora)
 
                     if key_a in self.x and key_b in self.x:
-                        self.model.Add(self.x[key_a] == self.x[key_b])
+                        if self.forced:
+                            # a manual choice may split a joint lesson: reported, not refused
+                            split = self.model.NewBoolVar(f"paired_split_{asg_a.assegnazione_id}_{giorno}_{ora}")
+                            self.model.Add(split >= self.x[key_a] - self.x[key_b])
+                            self.model.Add(split >= self.x[key_b] - self.x[key_a])
+                            self.soft_penalties.append(SoftPenalty(
+                                var=split, weight=1500, kind="paired_split",
+                                description=(
+                                    f"{asg_a.docente_nome}: lezione in coppia non condivisa tra "
+                                    f"{asg_a.classe_nome} e {asg_b.classe_nome}"
+                                ),
+                                docente_id=docente_id, classe_id=asg_a.classe_id, giorno=giorno, ora=8 + ora,
+                            ))
+                        else:
+                            self.model.Add(self.x[key_a] == self.x[key_b])
 
     def _constraint_teacher_availability(self) -> None:
         """

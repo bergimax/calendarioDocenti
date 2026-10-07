@@ -41,7 +41,15 @@ class ScheduleRepository:
         docenti_set = set()
         classi_set = set()
 
+        visti = set()
         for asg in assegnazioni:
+            # Stesso docente, classe e tipo = la stessa entità: una copia non deve diventare una
+            # seconda variabile (la lezione salvata non saprebbe a quale delle due appartiene).
+            trio = (asg.docente_id, asg.classe_id, asg.materia_id)
+            if trio in visti:
+                logger.warning(f"Assegnazione duplicata ignorata: {asg.id}")
+                continue
+            visti.add(trio)
             docente = self.db.query(Docente).filter_by(id=asg.docente_id).first()
             classe = self.db.query(Classe).filter_by(id=asg.classe_id).first()
             materia = self.db.query(Materia).filter_by(id=asg.materia_id).first()
