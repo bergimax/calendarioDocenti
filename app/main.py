@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
-from app.database import Base, engine, ensure_admin_role_column
+from app.database import Base, engine, ensure_admin_role_column, ensure_assegnazione_singola_column
 from app.routes import availability, setup, schedule, chat, dati, auth, soft_weights
 
 # Create tables
@@ -9,6 +9,7 @@ Base.metadata.create_all(bind=engine)
 
 
 ensure_admin_role_column()
+ensure_assegnazione_singola_column()
 
 # Initialize FastAPI
 app = FastAPI(

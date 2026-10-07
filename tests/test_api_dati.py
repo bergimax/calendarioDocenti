@@ -101,6 +101,74 @@ def test_class_pairings_crud(client, school_setup):
     assert r.status_code == 200
 
 
+def test_assignment_from_pairing_creates_both_classes(client, school_setup):
+    docente_id = next(iter(school_setup["teachers_by_name"].values()))
+    a = client.post("/api/classes", json={"nome": "3Y"}).json()
+    b = client.post("/api/classes", json={"nome": "3Z"}).json()
+    materia = client.post("/api/subjects", json={"nome": "Ginnastica", "tipo": "PRATICA"}).json()
+    pairing_id = client.post("/api/class-pairings", json={
+        "classe_a_id": a["classe_id"], "classe_b_id": b["classe_id"], "materia_id": materia["materia_id"],
+    }).json()["pairing_id"]
+
+    r = client.post("/api/assignments", json={
+        "docente_id": docente_id, "accoppiamento_id": pairing_id, "ore_totali": "40",
+    })
+    assert r.status_code == 200, r.text
+    rows = [x for x in client.get("/api/assignments").json() if x["materia_id"] == materia["materia_id"]]
+    assert {x["classe_id"] for x in rows} == {a["classe_id"], b["classe_id"]}
+    assert all(x["ore_totali"] == 40 for x in rows)
+
+    # Ogni riga conosce l'altra metà della coppia
+    by_classe = {x["classe_id"]: x for x in rows}
+    assert by_classe[a["classe_id"]]["partner_assignment_id"] == by_classe[b["classe_id"]]["assignment_id"]
+
+    # Aggiornare le ore su una riga le aggiorna anche sull'altra
+    client.put(f"/api/assignments/{rows[0]['assignment_id']}", json={"ore_totali": "55"})
+    rows = [x for x in client.get("/api/assignments").json() if x["materia_id"] == materia["materia_id"]]
+    assert all(x["ore_totali"] == 55 for x in rows)
+
+    # Riassegnare lo stesso accoppiamento non crea duplicati
+    r = client.post("/api/assignments", json={"docente_id": docente_id, "accoppiamento_id": pairing_id})
+    assert r.status_code == 400
+
+    # Eliminare una riga elimina entrambe le classi
+    client.delete(f"/api/assignments/{rows[0]['assignment_id']}")
+    assert not [x for x in client.get("/api/assignments").json() if x["materia_id"] == materia["materia_id"]]
+
+
+def test_teacher_in_a_pairing_can_also_have_a_class_alone(client, school_setup):
+    docente_id = next(iter(school_setup["teachers_by_name"].values()))
+    a = client.post("/api/classes", json={"nome": "4Y"}).json()
+    b = client.post("/api/classes", json={"nome": "4Z"}).json()
+    c = client.post("/api/classes", json={"nome": "1X"}).json()
+    materia = client.post("/api/subjects", json={"nome": "Pratica", "tipo": "PRATICA"}).json()
+    pairing_id = client.post("/api/class-pairings", json={
+        "classe_a_id": a["classe_id"], "classe_b_id": b["classe_id"], "materia_id": materia["materia_id"],
+    }).json()["pairing_id"]
+    m = materia["materia_id"]
+
+    client.post("/api/assignments", json={"docente_id": docente_id, "accoppiamento_id": pairing_id, "ore_totali": "40"})
+    # la classe 4Y, oltre che in coppia, viene tenuta anche da sola; 1X è singola e basta
+    r = client.post("/api/assignments", json={
+        "docente_id": docente_id, "classe_id": a["classe_id"], "materia_id": m, "ore_totali": "40",
+    })
+    assert r.status_code == 200, r.text
+    assert r.json()["singola"] is True and r.json()["partner_classe_id"] is None
+    client.post("/api/assignments", json={"docente_id": docente_id, "classe_id": c["classe_id"], "materia_id": m})
+
+    rows = [x for x in client.get("/api/assignments").json() if x["materia_id"] == m]
+    paired = [x for x in rows if x["partner_classe_id"]]
+    assert {x["classe_id"] for x in paired} == {a["classe_id"], b["classe_id"]}  # la coppia resta tale
+    assert len([x for x in rows if x["singola"]]) == 2
+
+    # eliminare la singola non tocca la coppia né il monte ore condiviso
+    single = next(x for x in rows if x["singola"] and x["classe_id"] == a["classe_id"])
+    client.delete(f"/api/assignments/{single['assignment_id']}")
+    rows = [x for x in client.get("/api/assignments").json() if x["materia_id"] == m]
+    assert len([x for x in rows if x["partner_classe_id"]]) == 2
+    assert all(x["ore_totali"] == 40 for x in rows if x["partner_classe_id"])
+
+
 def test_calendar_crud_coerces_form_strings(client, school_setup):
     """The frontend's CrudTable always posts string values, even for the
     boolean/int fields (native <select> option values)."""

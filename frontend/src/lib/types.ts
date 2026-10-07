@@ -93,6 +93,8 @@ export interface Assignment {
   materia_id: string;
   ore_totali: number;
   ore_erogate?: number;
+  partner_classe_id?: string | null;
+  partner_assignment_id?: string | null;
 }
 
 export interface ClassPairing {

@@ -8,6 +8,8 @@ export interface Column<T> {
   key: string;
   header: string;
   render: (row: T) => ReactNode;
+  /** Se presente, l'intestazione è cliccabile e ordina le righe per questo valore. */
+  sortValue?: (row: T) => string | number;
 }
 
 /**
@@ -21,6 +23,9 @@ export function CrudTable<T extends Record<string, unknown>>({
   columns,
   form,
   emptyHint,
+  newTitle = "Nuovo record",
+  hideRow,
+  defaultSort,
 }: {
   title: string;
   endpoint: string;
@@ -31,7 +36,15 @@ export function CrudTable<T extends Record<string, unknown>>({
     set: (key: string, val: string) => void;
   }) => ReactNode;
   emptyHint?: string;
+  newTitle?: string;
+  /** Righe da non mostrare (es. la seconda metà di una coppia già rappresentata da un'altra riga). */
+  hideRow?: (row: T) => boolean;
+  /** Chiave della colonna con cui ordinare all'apertura. */
+  defaultSort?: string;
 }) {
+  const [sort, setSort] = useState<{ key: string; dir: 1 | -1 } | null>(
+    defaultSort ? { key: defaultSort, dir: 1 } : null,
+  );
   const [draft, setDraft] = useState<Record<string, string>>({});
   const [editingId, setEditingId] = useState<string | null>(null);
   const [confirmingId, setConfirmingId] = useState<string | null>(null);
@@ -78,7 +91,20 @@ export function CrudTable<T extends Record<string, unknown>>({
     }
   }
 
-  const rows = query.data ?? [];
+  const sortCol = sort ? columns.find((c) => c.key === sort.key && c.sortValue) : undefined;
+  const rows = (query.data ?? []).filter((r) => !hideRow?.(r));
+  if (sort && sortCol?.sortValue) {
+    const val = sortCol.sortValue;
+    rows.sort((a, b) => {
+      const x = val(a);
+      const y = val(b);
+      const cmp =
+        typeof x === "number" && typeof y === "number"
+          ? x - y
+          : String(x).localeCompare(String(y), "it", { numeric: true, sensitivity: "base" });
+      return cmp * sort.dir;
+    });
+  }
 
   return (
     <div className="grid max-w-6xl gap-4 lg:grid-cols-[1fr_320px]">
@@ -100,7 +126,20 @@ export function CrudTable<T extends Record<string, unknown>>({
               <tr className="bg-muted font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
                 {columns.map((c) => (
                   <th key={c.key} className="border-b border-edge px-3 py-2 text-left font-medium">
-                    {c.header}
+                    {c.sortValue ? (
+                      <button
+                        type="button"
+                        className="font-medium uppercase tracking-wider hover:text-foreground"
+                        onClick={() =>
+                          setSort((p) => ({ key: c.key, dir: p?.key === c.key && p.dir === 1 ? -1 : 1 }))
+                        }
+                      >
+                        {c.header}
+                        {sort?.key === c.key ? (sort.dir === 1 ? " ▲" : " ▼") : ""}
+                      </button>
+                    ) : (
+                      c.header
+                    )}
                   </th>
                 ))}
                 <th className="border-b border-edge px-3 py-2 text-right font-medium">Azioni</th>
@@ -167,7 +206,7 @@ export function CrudTable<T extends Record<string, unknown>>({
         ) : null}
       </Panel>
 
-      <Panel title={editingId ? "Modifica record" : "Nuovo record"}>
+      <Panel title={editingId ? "Modifica record" : newTitle}>
         <div className="space-y-3">
           {form({ value: draft, set })}
           {actionError ? (

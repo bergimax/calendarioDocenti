@@ -14,6 +14,7 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { API_BASE_URL, api, apiBlob, apiErrorMessage, isSegreteria } from "@/lib/api";
+import { weekLabel, weekLabelFor } from "@/lib/weeks";
 import type {
   ChatMessage,
   Conflict,
@@ -351,7 +352,7 @@ function SchedulePage() {
   return (
     <AppShell
       title="Orario settimanale"
-      subtitle={week ? `Settimana dal ${week}` : "Seleziona una settimana"}
+      subtitle={week ? weekLabelFor(weeks.data?.weeks, week) : "Seleziona una settimana"}
       actions={
         <>
           <Select
@@ -362,12 +363,12 @@ function SchedulePage() {
               setConflictSel(null);
               setSelectedCell(null);
             }}
-            className="w-52 py-1.5 text-xs"
+            className="w-64 py-1.5 text-xs"
           >
             <option value="">Settimana…</option>
             {(weeks.data?.weeks ?? []).map((w) => (
               <option key={w.start} value={w.start}>
-                Settimana {w.week_num} ({w.start})
+                {weekLabel(w)}
               </option>
             ))}
           </Select>

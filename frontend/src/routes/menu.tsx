@@ -19,11 +19,6 @@ export const Route = createFileRoute("/menu")({
 
 const CARDS = [
   {
-    to: "/setup",
-    title: "Setup iniziale",
-    desc: "Carica calendario e anagrafiche, valida ed applica correzioni.",
-  },
-  {
     to: "/disponibilita",
     title: "Disponibilità docenti",
     desc: "Griglia settimanale ore × giorni per ogni docente.",
@@ -37,6 +32,11 @@ const CARDS = [
     to: "/dati",
     title: "Dati scuola",
     desc: "Calendario, docenti, classi, assegnazioni, accoppiamenti.",
+  },
+  {
+    to: "/setup",
+    title: "Setup iniziale",
+    desc: "Carica calendario e anagrafiche, valida ed applica correzioni.",
   },
 ] as const;
 

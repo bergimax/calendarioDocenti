@@ -1,6 +1,6 @@
 from sqlalchemy import Column, String, Integer, Float, Boolean, Date, DateTime, ForeignKey, JSON, Enum, Text
 from sqlalchemy.orm import relationship
-from sqlalchemy.sql import func
+from sqlalchemy.sql import expression, func
 from datetime import datetime
 import enum
 from app.database import Base
@@ -101,6 +101,9 @@ class Assegnazione(Base):
     docente_id = Column(String, ForeignKey("docente.id"), nullable=False)
     classe_id = Column(String, ForeignKey("classe.id"), nullable=False)
     materia_id = Column(String, ForeignKey("materia.id"), nullable=False)
+    # True = il docente tiene questa classe da sola anche se la classe fa parte di un
+    # accoppiamento (solo presentazione/gestione in Dati scuola, il solver non la usa).
+    singola = Column(Boolean, nullable=False, default=False, server_default=expression.false())
     created_at = Column(DateTime, server_default=func.now())
 
     # Relationships

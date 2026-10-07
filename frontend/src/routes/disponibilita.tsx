@@ -5,6 +5,7 @@ import { AppShell } from "@/components/AppShell";
 import { Badge, Button, Select } from "@/components/ui-kit";
 import { ErrorState, LoadingState, Panel } from "@/components/States";
 import { api, apiErrorMessage } from "@/lib/api";
+import { weekLabel, weekLabelFor } from "@/lib/weeks";
 import type {
   AvailabilityStatus,
   Giorno,
@@ -111,18 +112,18 @@ function AvailabilityPage() {
   return (
     <AppShell
       title="Disponibilità docenti"
-      subtitle={week ? `Settimana dal ${week}` : "Seleziona una settimana"}
+      subtitle={week ? weekLabelFor(weeks.data?.weeks, week) : "Seleziona una settimana"}
       actions={
         <>
           <Select
             value={week}
             onChange={(e) => setWeek(e.target.value)}
-            className="w-56 py-1.5 text-xs"
+            className="w-64 py-1.5 text-xs"
           >
             <option value="">Settimana…</option>
             {(weeks.data?.weeks ?? []).map((w) => (
               <option key={w.start} value={w.start}>
-                Settimana {w.week_num} ({w.start} → {w.end})
+                {weekLabel(w)}
               </option>
             ))}
           </Select>

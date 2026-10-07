@@ -42,3 +42,14 @@ def ensure_admin_role_column() -> None:
         return
     with engine.begin() as conn:
         conn.execute(text("ALTER TABLE admin ADD COLUMN role VARCHAR(20) NOT NULL DEFAULT 'ADMIN'"))
+
+
+def ensure_assegnazione_singola_column() -> None:
+    """Aggiunge assegnazione.singola ai database creati prima di questo flag
+    (le righe esistenti restano "accoppiate se la classe è in un accoppiamento")."""
+    from sqlalchemy import inspect, text
+
+    if "singola" in {c["name"] for c in inspect(engine).get_columns("assegnazione")}:
+        return
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE assegnazione ADD COLUMN singola BOOLEAN NOT NULL DEFAULT FALSE"))
