@@ -488,6 +488,10 @@ class SetupService:
             self.repo.bulk_create_calendar(scuola.id, calendario)
             self.repo.bulk_create_assignments(scuola.id, assegnazioni, docenti_map, classe_map, materie_map)
             self.repo.bulk_create_paired_classes(scuola.id, accoppiamenti, classe_map, materie_map)
+            # la materia non conta: ogni assegnazione diventa "in coppia" o "singola"
+            from app.services.tipo_lezione import normalize_tipo_lezione
+            self.repo.db.flush()
+            normalize_tipo_lezione(self.repo.db, scuola.id)
 
             # Commit transaction
             self.repo.commit()

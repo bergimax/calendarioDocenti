@@ -3,6 +3,7 @@ import { CrudTable } from "@/components/CrudTable";
 import { useQuery } from "@tanstack/react-query";
 import { Field, Select } from "@/components/ui-kit";
 import { api } from "@/lib/api";
+import { sortClassiByNome } from "@/lib/classi";
 import type { CalendarEntry, SchoolClass } from "@/lib/types";
 
 export const Route = createFileRoute("/dati/calendario")({
@@ -91,7 +92,7 @@ function CalendarPage() {
             onChange={(e) => set("flag_stage_classe_id", e.target.value)}
           >
             <option value="">Nessuna</option>
-            {(classes.data ?? []).map((c) => (
+            {sortClassiByNome(classes.data).map((c) => (
               <option key={c.classe_id} value={c.classe_id}>
                 {c.nome}
               </option>

@@ -13,6 +13,7 @@ MOTIVI: Dict[str, str] = {
     "classe_late_start": "Classi che iniziano tardi",
     "friday_late_start": "Venerdì non inizia alle 8",
     "teoria_consecutive": "Troppe ore di teoria consecutive",
+    "paired_consecutive": "Stesso docente su ore consecutive della stessa coppia",
     "paired_hours": "Più ore in coppia nello stesso giorno per un docente",
     "pratica_block": "Blocchi di pratica spezzati o troppo corti",
     "contractor_gap": "Buchi (ore libere) nei docenti a contratto",

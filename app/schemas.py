@@ -233,6 +233,9 @@ class AssignSlotRequest(BaseModel):
     ora_inizio: int
     docente_id: str
     materia_id: str
+    # False: se l'assegnazione forza regole, non salva e chiede conferma all'admin
+    # (status "needs_confirmation" con l'elenco delle regole); True: l'admin ha accettato.
+    confirm: bool = False
 
 
 class ApproveConflictRequest(BaseModel):

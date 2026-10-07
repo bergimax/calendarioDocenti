@@ -72,6 +72,7 @@ class ScheduleRepository:
                 materia_tipo=materia.tipo,
                 peso_cognitivo=materia.peso_cognitivo,
                 ore_residue=ore_residue,
+                singola=bool(asg.singola),
             )
 
             assegnazioni_dati.append(asg_data)

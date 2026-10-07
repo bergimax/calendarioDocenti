@@ -41,6 +41,9 @@ class AssegnazioneDati:
     materia_tipo: str  # "TEORIA" or "PRATICA"
     peso_cognitivo: str  # "ALTO", "MEDIO", "BASSO"
     ore_residue: int  # ore_totali - ore_erogate
+    # La classe è tenuta da sola dal docente anche se fa parte di un accoppiamento:
+    # non partecipa alla lezione in comune (vincolo di coppia, flag "accoppiata").
+    singola: bool = False
 
 
 @dataclass
@@ -350,9 +353,9 @@ class ScheduleSolver:
         """
         if not docente_id:
             return None
-        asg_a = next((a for a in self.context.assegnazioni if a.classe_id == classe_a
+        asg_a = next((a for a in self.context.assegnazioni if a.classe_id == classe_a and not a.singola
                       and a.materia_id == materia_id and a.docente_id == docente_id), None)
-        asg_b = next((a for a in self.context.assegnazioni if a.classe_id == classe_b
+        asg_b = next((a for a in self.context.assegnazioni if a.classe_id == classe_b and not a.singola
                       and a.materia_id == materia_id and a.docente_id == docente_id), None)
         return (asg_a, asg_b) if asg_a and asg_b else None
 
@@ -1094,6 +1097,11 @@ class ScheduleSolver:
         # (weight 10)
         self._soft_avoid_single_classe_day()
 
+        # Soft 4c: the same docente shouldn't teach a pair of classes in
+        # consecutive hours - rotate the docenti of the pair instead
+        # (weight 150)
+        self._soft_paired_no_continuity()
+
         # Soft 5: Start the day at 8:00 (weight 100 - top priority; only
         # yield to a later start when 8:00 is genuinely unavailable that
         # day, see _soft_classe_start_at_8). Filling every classroom hour
@@ -1406,9 +1414,14 @@ class ScheduleSolver:
         """Soft: Minimize gaps (hole hours) for contractors (weight 12)."""
         weight = self._soft_weights["contractor_gap"]
 
+        # The "B" side of a joint (paired) lesson is the same hour as its "A" side:
+        # counting both would make a docente "busy" twice in one hour (sum 2, not a
+        # 0/1 flag) and forbid every joint lesson of a CONTRATTO docente.
+        skip_ids = self._paired_assignment_ids_to_dedupe()
         contractor_asgs = [
             asg for asg in self.context.assegnazioni
             if self.context.docenti_map.get(asg.docente_id) == "CONTRATTO"
+            and asg.assegnazione_id not in skip_ids
         ]
 
         for docente_id in set(asg.docente_id for asg in contractor_asgs):
@@ -1559,6 +1572,46 @@ class ScheduleSolver:
                         },
                     ))
 
+    def _soft_paired_no_continuity(self) -> None:
+        """
+        Soft: when the same docente gives a joint lesson to a pair of classes
+        in two consecutive hours (e.g. Bertussi on 2 INFO + 2 ELE at 11 and
+        12), it is penalized: in practice it is lighter to swap docenti
+        between the hours of a pair than to keep one docente fixed on it
+        (admin, 2026-10-07). Weight 150 (like the contractor gaps): a strong
+        preference, never above the relaxable-hard rules (1000), so it only
+        gives way when there is no other docente who can take the hour.
+
+        Per pair (not per docente), so back-to-back joint hours with two
+        DIFFERENT pairs are not affected.
+        """
+        weight = self._soft_weights["paired_consecutive"]
+        classe_nomi = {a.classe_id: a.classe_nome for a in self.context.assegnazioni}
+
+        for classe_a, classe_b, materia_id, docente_id in self.context.classi_accoppiate:
+            pair = self._paired_assignment_pair(classe_a, classe_b, materia_id, docente_id)
+            if not pair:
+                continue
+            asg_a = pair[0]
+            for giorno in range(5):
+                for ora in range(5):
+                    k1 = (asg_a.assegnazione_id, giorno, ora)
+                    k2 = (asg_a.assegnazione_id, giorno, ora + 1)
+                    if k1 not in self.x or k2 not in self.x:
+                        continue
+                    both = self.model.NewBoolVar(f"paired_consec_{asg_a.assegnazione_id}_{giorno}_{ora}")
+                    self.model.AddBoolAnd([self.x[k1], self.x[k2]]).OnlyEnforceIf(both)
+                    self.model.AddBoolOr([self.x[k1].Not(), self.x[k2].Not()]).OnlyEnforceIf(both.Not())
+                    self.soft_penalties.append(SoftPenalty(
+                        var=both, weight=weight, kind="paired_consecutive",
+                        description=(
+                            f"{asg_a.docente_nome} fa ore consecutive con la stessa coppia "
+                            f"({asg_a.classe_nome} + {classe_nomi.get(classe_b, classe_b)}, "
+                            f"{GIORNI_NOMI_IT[GiornoEnum(giorno).name]})"
+                        ),
+                        docente_id=docente_id, classe_id=asg_a.classe_id, giorno=giorno, ora=8 + ora + 1,
+                    ))
+
     def solve_fixed(self, assigned_keys: Set[Tuple[str, int, int]], timeout_seconds: int = 10) -> str:
         """
         Solve the model with every decision variable pinned to a specific,
@@ -1638,7 +1691,7 @@ class ScheduleSolver:
                 classe_accoppiata_id = None
                 for c_a, c_b, mat, doc_id in self.context.classi_accoppiate:
                     if (asg.classe_id in (c_a, c_b) and asg.materia_id == mat
-                            and doc_id == asg.docente_id):
+                            and doc_id == asg.docente_id and not asg.singola):
                         accoppiata = True
                         classe_accoppiata_id = c_b if asg.classe_id == c_a else c_a
                         break

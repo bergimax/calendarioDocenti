@@ -16,6 +16,8 @@ from sqlalchemy.exc import IntegrityError
 from datetime import date
 from typing import Any, Dict, List, Optional
 from app.models import Classe, Materia, Assegnazione, MonteOreAnnuale, ClasseAccoppiata, CalendarioAnnuale
+from app.services.tipo_lezione import tipo_materie
+import itertools
 import logging
 
 logger = logging.getLogger(__name__)
@@ -143,16 +145,11 @@ class SchoolDataService:
     def _materia_dict(m: Materia) -> Dict[str, Any]:
         return {"materia_id": m.id, "nome": m.nome, "tipo": m.tipo, "peso_cognitivo": m.peso_cognitivo}
 
-    def _default_materia_id(self, scuola_id: str) -> str:
-        """Fallback materia for assegnazioni/accoppiamenti created without one
-        picked in the UI (the "Dati scuola" forms no longer ask for materia -
-        it isn't meaningful for accoppiamenti, which are compresenza detected
-        from the calendar, not a shared subject - see
-        scripts/rederive_monte_ore_and_pairings.py)."""
-        materia = self.db.query(Materia).filter_by(scuola_id=scuola_id).first()
-        if not materia:
-            raise ValueError("No materia exists for this scuola - create one first")
-        return materia.id
+    def _tipo_ids(self, scuola_id: str) -> tuple[str, str]:
+        """(id "In coppia", id "Singola"): la materia non esiste più, vedi app/services/tipo_lezione.py."""
+        coppia, singola = tipo_materie(self.db, scuola_id)
+        self.db.flush()
+        return coppia, singola
 
     # ===== Assegnazioni (+ monte ore) =====
     # The "Dati scuola" page's single form conflates two tables: the
@@ -164,29 +161,44 @@ class SchoolDataService:
         rows = self.db.query(Assegnazione).filter_by(scuola_id=scuola_id).all()
         return [self._assegnazione_dict(a) for a in rows]
 
-    def _partner(self, a: Assegnazione) -> tuple[Optional[str], Optional[str]]:
-        """(classe_id, assignment_id) della classe con cui `a` è accoppiata, se c'è.
+    def _group_classi(
+        self, scuola_id: str, materia_id: str, docente_id: str, start: List[str],
+    ) -> List[str]:
+        """Classi collegate a `start` da accoppiamenti della stessa materia, del docente (o
+        senza docente specifico), anche indirettamente (A+B, A+C, B+C -> gruppo A, B, C)."""
+        pairings = self.db.query(ClasseAccoppiata).filter(
+            ClasseAccoppiata.scuola_id == scuola_id,
+            (ClasseAccoppiata.docente_id.is_(None)) | (ClasseAccoppiata.docente_id == docente_id),
+        ).all()
+        group = list(dict.fromkeys(start))
+        grew = True
+        while grew:
+            grew = False
+            for p in pairings:
+                if (p.classe_a_id in group) != (p.classe_b_id in group):
+                    group.extend(c for c in (p.classe_a_id, p.classe_b_id) if c not in group)
+                    grew = True
+        return group
 
-        Accoppiata = esiste un accoppiamento con la stessa materia che include la
-        classe ed è del docente (o senza docente specifico). L'assignment_id è
-        None se l'altra classe non è (ancora) assegnata allo stesso docente.
+    def _partners(self, a: Assegnazione) -> List[tuple[str, Optional[str]]]:
+        """[(classe_id, assignment_id)] delle altre classi del gruppo di `a`.
+
+        Accoppiata = la classe è in un accoppiamento (stessa materia, del docente o senza
+        docente specifico). L'assignment_id è None se quella classe non è (ancora)
+        assegnata allo stesso docente. Una assegnazione singola non ha partner.
         """
         if a.singola:
-            return None, None
-        pairing = self.db.query(ClasseAccoppiata).filter(
-            ClasseAccoppiata.scuola_id == a.scuola_id,
-            ClasseAccoppiata.materia_id == a.materia_id,
-            (ClasseAccoppiata.classe_a_id == a.classe_id) | (ClasseAccoppiata.classe_b_id == a.classe_id),
-            (ClasseAccoppiata.docente_id.is_(None)) | (ClasseAccoppiata.docente_id == a.docente_id),
-        ).first()
-        if not pairing:
-            return None, None
-        other = pairing.classe_b_id if pairing.classe_a_id == a.classe_id else pairing.classe_a_id
-        partner = self.db.query(Assegnazione).filter_by(
-            scuola_id=a.scuola_id, docente_id=a.docente_id, classe_id=other, materia_id=a.materia_id,
-            singola=False,
-        ).first()
-        return other, partner.id if partner else None
+            return []
+        out = []
+        for classe_id in self._group_classi(a.scuola_id, a.materia_id, a.docente_id, [a.classe_id]):
+            if classe_id == a.classe_id:
+                continue
+            partner = self.db.query(Assegnazione).filter_by(
+                scuola_id=a.scuola_id, docente_id=a.docente_id, classe_id=classe_id,
+                materia_id=a.materia_id, singola=False,
+            ).first()
+            out.append((classe_id, partner.id if partner else None))
+        return out
 
     def _monte(self, a: Assegnazione) -> Optional[MonteOreAnnuale]:
         return self.db.query(MonteOreAnnuale).filter_by(
@@ -194,49 +206,49 @@ class SchoolDataService:
         ).first()
 
     def create_assegnazione(self, scuola_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Un'assegnazione è docente + classe + tipo (in coppia / singola), ognuna con il proprio
+        monte ore: la stessa classe può avere sia la coppia sia la singola, due entità distinte."""
         docente_id = (data.get("docente_id") or "").strip()
         accoppiamento_id = (data.get("accoppiamento_id") or "").strip()
-        materia_id = (data.get("materia_id") or "").strip() or self._default_materia_id(scuola_id)
+        coppia_id, singola_id = self._tipo_ids(scuola_id)
 
-        # Un accoppiamento definito in "Accoppiamenti" genera un'assegnazione
-        # per ciascuna delle due classi, con lo stesso monte ore.
+        # Un accoppiamento definito in "Accoppiamenti" genera un'assegnazione in coppia per
+        # ciascuna classe del gruppo (anche 3-4 classi), con le stesse ore.
         if accoppiamento_id:
             pairing = self.db.query(ClasseAccoppiata).filter_by(id=accoppiamento_id, scuola_id=scuola_id).first()
             if not pairing:
                 raise ValueError(f"Accoppiamento {accoppiamento_id!r} not found")
-            classe_ids = [pairing.classe_a_id, pairing.classe_b_id]
-            materia_id = pairing.materia_id or materia_id
+            materia_id, singola = coppia_id, False
+            classe_ids = self._group_classi(
+                scuola_id, materia_id, docente_id, [pairing.classe_a_id, pairing.classe_b_id],
+            )
         else:
+            materia_id, singola = singola_id, True
             classe_ids = [(data.get("classe_id") or "").strip()]
 
-        if not (docente_id and all(classe_ids) and materia_id):
+        if not (docente_id and all(classe_ids)):
             raise ValueError("docente_id and classe_id are required")
 
         created = []
         for classe_id in classe_ids:
             trio = dict(scuola_id=scuola_id, docente_id=docente_id, classe_id=classe_id, materia_id=materia_id)
-            if accoppiamento_id and self.db.query(Assegnazione).filter_by(singola=False, **trio).first():
-                continue  # già assegnata: non duplicare
-            # Una classe scelta da sola resta singola anche se fa parte di un accoppiamento.
-            asg = Assegnazione(singola=not accoppiamento_id, **trio)
-            # Il monte ore è per (docente, classe, materia): se c'è già, si aggiorna.
-            monte = self.db.query(MonteOreAnnuale).filter_by(**trio).first()
-            if not monte:
-                monte = MonteOreAnnuale(**trio, ore_totali=0, ore_erogate=0)
-                self.db.add(monte)
-            if data.get("ore_totali") not in (None, ""):
-                monte.ore_totali = _int_or(data.get("ore_totali"), monte.ore_totali)
-            if data.get("ore_erogate") not in (None, ""):
-                monte.ore_erogate = _int_or(data.get("ore_erogate"), monte.ore_erogate)
+            if self.db.query(Assegnazione).filter_by(**trio).first():
+                continue  # già assegnata (stesso docente, classe e tipo): non duplicare
+            asg = Assegnazione(singola=singola, **trio)
             self.db.add(asg)
+            self.db.add(MonteOreAnnuale(
+                **trio,
+                ore_totali=_int_or(data.get("ore_totali"), 0) or 0,
+                ore_erogate=_int_or(data.get("ore_erogate"), 0) or 0,
+            ))
             created.append(asg)
         if not created:
-            raise ValueError("Questo accoppiamento è già assegnato al docente")
+            raise ValueError("Questa assegnazione esiste già per il docente")
         try:
             self.db.commit()
         except IntegrityError:
             self.db.rollback()
-            raise ValueError("docente_id, classe_id or materia_id does not reference an existing record")
+            raise ValueError("docente_id or classe_id does not reference an existing record")
         return self._assegnazione_dict(created[0])
 
     def update_assegnazione(self, scuola_id: str, assignment_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
@@ -249,18 +261,19 @@ class SchoolDataService:
         monte = self.db.query(MonteOreAnnuale).filter_by(
             scuola_id=scuola_id, docente_id=asg.docente_id, classe_id=asg.classe_id, materia_id=asg.materia_id,
         ).first()
-        # La riga di un'assegnazione accoppiata rappresenta entrambe le classi:
-        # ore e docente si applicano anche all'altra.
-        _, partner_id = self._partner(asg)
-        partner = self.db.query(Assegnazione).filter_by(id=partner_id).first() if partner_id else None
-        partner_monte = self._monte(partner) if partner else None
+        # La riga di un'assegnazione accoppiata rappresenta tutte le classi del gruppo:
+        # ore e docente si applicano anche alle altre.
+        partners = [
+            self.db.query(Assegnazione).filter_by(id=pid).first()
+            for _, pid in self._partners(asg) if pid
+        ]
+        partner_montes = [(p, self._monte(p)) for p in partners]
 
         if data.get("docente_id"):
             asg.docente_id = data["docente_id"].strip()
         if data.get("classe_id"):
             asg.classe_id = data["classe_id"].strip()
-        if data.get("materia_id"):
-            asg.materia_id = data["materia_id"].strip()
+        # il tipo (in coppia / singola) non si cambia: è parte dell'identità dell'assegnazione
 
         if not monte:
             monte = MonteOreAnnuale(
@@ -278,7 +291,7 @@ class SchoolDataService:
         if "ore_erogate" in data:
             monte.ore_erogate = _int_or(data.get("ore_erogate"), monte.ore_erogate)
 
-        if partner:
+        for partner, partner_monte in partner_montes:
             if data.get("docente_id"):
                 partner.docente_id = asg.docente_id
             if partner_monte:
@@ -293,11 +306,11 @@ class SchoolDataService:
         asg = self.db.query(Assegnazione).filter_by(id=assignment_id, scuola_id=scuola_id).first()
         if not asg:
             raise ValueError(f"Assegnazione {assignment_id!r} not found")
-        # La riga di un'assegnazione accoppiata rappresenta entrambe le classi.
-        _, partner_id = self._partner(asg)
-        targets = [asg]
-        if partner_id:
-            targets.append(self.db.query(Assegnazione).filter_by(id=partner_id).first())
+        # La riga di un'assegnazione accoppiata rappresenta tutte le classi del gruppo.
+        targets = [asg] + [
+            self.db.query(Assegnazione).filter_by(id=pid).first()
+            for _, pid in self._partners(asg) if pid
+        ]
         try:
             for t in targets:
                 trio = dict(scuola_id=scuola_id, docente_id=t.docente_id, classe_id=t.classe_id, materia_id=t.materia_id)
@@ -317,7 +330,7 @@ class SchoolDataService:
         monte = self.db.query(MonteOreAnnuale).filter_by(
             scuola_id=a.scuola_id, docente_id=a.docente_id, classe_id=a.classe_id, materia_id=a.materia_id,
         ).first()
-        partner_classe_id, partner_assignment_id = self._partner(a)
+        partners = self._partners(a)
         return {
             "assignment_id": a.id,
             "docente_id": a.docente_id,
@@ -326,8 +339,9 @@ class SchoolDataService:
             "ore_totali": monte.ore_totali if monte else 0,
             "ore_erogate": monte.ore_erogate if monte else 0,
             "singola": bool(a.singola),
-            "partner_classe_id": partner_classe_id,
-            "partner_assignment_id": partner_assignment_id,
+            # Altre classi del gruppo (vuoto = singola) e le loro assegnazioni già presenti
+            "partner_classe_ids": [c for c, _ in partners],
+            "partner_assignment_ids": [pid for _, pid in partners if pid],
         }
 
     # ===== Accoppiamenti =====
@@ -337,24 +351,47 @@ class SchoolDataService:
         return [self._accoppiamento_dict(c) for c in rows]
 
     def create_accoppiamento(self, scuola_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
-        classe_a_id = (data.get("classe_a_id") or "").strip()
-        classe_b_id = (data.get("classe_b_id") or "").strip()
-        materia_id = (data.get("materia_id") or "").strip() or self._default_materia_id(scuola_id)
-        if not (classe_a_id and classe_b_id and materia_id):
-            raise ValueError("classe_a_id and classe_b_id are required")
+        materia_id, _ = self._tipo_ids(scuola_id)
+        docente_id = (data.get("docente_id") or "").strip() or None
+        note = (data.get("note") or "").strip() or None
 
-        pairing = ClasseAccoppiata(
-            scuola_id=scuola_id, classe_a_id=classe_a_id, classe_b_id=classe_b_id, materia_id=materia_id,
-            docente_id=(data.get("docente_id") or "").strip() or None,
-            note=(data.get("note") or "").strip() or None,
-        )
-        self.db.add(pairing)
+        # Gruppo agile: "classi_ids" (separati da virgola) crea tutte le coppie tra le classi
+        # indicate (4 classi -> 6 accoppiamenti); quelle già presenti si saltano.
+        classi_ids = [c.strip() for c in str(data.get("classi_ids") or "").split(",") if c.strip()]
+        if classi_ids:
+            if len(set(classi_ids)) < 2:
+                raise ValueError("Servono almeno 2 classi")
+            coppie = list(itertools.combinations(dict.fromkeys(classi_ids), 2))
+        else:
+            classe_a_id = (data.get("classe_a_id") or "").strip()
+            classe_b_id = (data.get("classe_b_id") or "").strip()
+            if not (classe_a_id and classe_b_id):
+                raise ValueError("classe_a_id and classe_b_id are required")
+            coppie = [(classe_a_id, classe_b_id)]
+        existing = {
+            frozenset((p.classe_a_id, p.classe_b_id))
+            for p in self.db.query(ClasseAccoppiata).filter_by(
+                scuola_id=scuola_id, materia_id=materia_id, docente_id=docente_id,
+            ).all()
+        }
+        created = []
+        for a_id, b_id in coppie:
+            if frozenset((a_id, b_id)) in existing:
+                continue
+            pairing = ClasseAccoppiata(
+                scuola_id=scuola_id, classe_a_id=a_id, classe_b_id=b_id, materia_id=materia_id,
+                docente_id=docente_id, note=note,
+            )
+            self.db.add(pairing)
+            created.append(pairing)
+        if not created:
+            raise ValueError("Questi accoppiamenti esistono già")
         try:
             self.db.commit()
         except IntegrityError:
             self.db.rollback()
             raise ValueError("classe_a_id, classe_b_id or materia_id does not reference an existing record")
-        return self._accoppiamento_dict(pairing)
+        return self._accoppiamento_dict(created[0])
 
     def update_accoppiamento(self, scuola_id: str, pairing_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
         pairing = self.db.query(ClasseAccoppiata).filter_by(id=pairing_id, scuola_id=scuola_id).first()
@@ -364,8 +401,6 @@ class SchoolDataService:
             pairing.classe_a_id = data["classe_a_id"].strip()
         if data.get("classe_b_id"):
             pairing.classe_b_id = data["classe_b_id"].strip()
-        if data.get("materia_id"):
-            pairing.materia_id = data["materia_id"].strip()
         if "docente_id" in data:
             pairing.docente_id = (data.get("docente_id") or "").strip() or None
         if "note" in data:

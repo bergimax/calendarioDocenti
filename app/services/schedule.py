@@ -356,10 +356,15 @@ class ScheduleService:
 
     def assign_slot(
         self, scuola_id: str, week_start: date, classe_id: str, giorno: str, ora_inizio: int,
-        docente_id: str, materia_id: str,
+        docente_id: str, materia_id: str, confirm: bool = False,
     ) -> Dict[str, Any]:
         """
-        Manual assignment ("forzatura") of a lesson to a free hour. The
+        Manual assignment ("forzatura") of a lesson to a free hour. If it would
+        force a rule (a conflict the schedule does not have yet, for the docente
+        or the classi involved) nothing is saved unless `confirm` is True: the
+        reply is {"status": "needs_confirmation", "regole": [...]} so the admin
+        sees which rule and decides. Ore del docente in più/in meno (avvisi) do
+        not need confirmation. The
         result is checked like a manual edit (solve_fixed with the
         best-effort fallback): rules the solver can relax (availability,
         target hours, Friday start, ...) don't block it, they come back as
@@ -466,6 +471,28 @@ class ScheduleService:
                 "status": "error",
                 "message": "Assegnazione non possibile: viola una regola non derogabile del modello.",
             }
+
+        # Which rules does this assignment force? Conflicts that the schedule does not
+        # have yet, about this docente or the classi of the lesson (ore in più/in meno are
+        # warnings, not rules, so they never need confirmation).
+        if not confirm:
+            after = self._apply_handled(orario.id, solver.get_conflicts())
+            candidates = [
+                c for c in after
+                if not c.get("avviso") and (c.get("docente_id") == docente_id or c.get("classe_id") in group)
+            ]
+            if candidates:
+                before = {c.get("chiave") for c in (self.get_schedule(scuola_id, week_start) or {}).get("conflicts", [])}
+                forced = [c for c in candidates if c.get("chiave") not in before]
+                if forced:
+                    return {
+                        "status": "needs_confirmation",
+                        "message": "Questa assegnazione forza delle regole: confermi?",
+                        "regole": [
+                            {"kind": c.get("kind"), "description": c["description"], "chiave": c.get("chiave")}
+                            for c in forced
+                        ],
+                    }
 
         quality_score, quality_level, n_conflicts = solver.calculate_quality_score()
         try:
@@ -773,7 +800,7 @@ class ScheduleService:
     def scale_monte_ore(self, scuola_id: str, orario) -> Dict[str, int]:
         """
         Add every lesson of `orario` as 1 delivered hour to ore_erogate of its
-        assegnazione (classe + materia + docente). Does not commit and does not
+        assegnazione (classe + docente + tipo: in coppia o singola). Does not commit and does not
         check whether the week was already scaled: callers (approve_schedule,
         scripts/backfill_ore_erogate.py) own that.
         """
@@ -821,7 +848,7 @@ class ScheduleService:
 
         Approving is also the moment the week's hours are "delivered": every
         lesson of the week is added to ore_erogate of its own assegnazione
-        (docente + classe + materia), so the residual (ore_totali -
+        (docente + classe + tipo in coppia/singola), so the residual (ore_totali -
         ore_erogate) that the next weeks' targets are built on goes down.
         Each classe of a joint (accoppiata) lesson receives it, so both
         sides' assegnazioni are scaled. Hours that were not held (an absence,

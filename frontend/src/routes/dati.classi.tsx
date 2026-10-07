@@ -1,5 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { CrudTable } from "@/components/CrudTable";
+import { classeSortValue } from "@/lib/classi";
 import { Field } from "@/components/ui-kit";
 import type { SchoolClass } from "@/lib/types";
 
@@ -15,7 +16,10 @@ function ClassesPage() {
       idKey="classe_id"
       newTitle="Nuova classe"
       emptyHint="Nessuna classe restituita dal server."
-      columns={[{ key: "nome", header: "Classe", render: (r) => r.nome }]}
+      defaultSort="nome"
+      columns={[
+        { key: "nome", header: "Classe", render: (r) => r.nome, sortValue: (r) => classeSortValue(r.nome) },
+      ]}
       form={({ value, set }) => (
         <>
           <Field

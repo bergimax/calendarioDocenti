@@ -26,6 +26,7 @@ export function CrudTable<T extends Record<string, unknown>>({
   newTitle = "Nuovo record",
   hideRow,
   defaultSort,
+  thenSortBy,
 }: {
   title: string;
   endpoint: string;
@@ -41,6 +42,8 @@ export function CrudTable<T extends Record<string, unknown>>({
   hideRow?: (row: T) => boolean;
   /** Chiave della colonna con cui ordinare all'apertura. */
   defaultSort?: string;
+  /** A parità di valore, ordina sempre in modo crescente per questa chiave. */
+  thenSortBy?: (row: T) => string;
 }) {
   const [sort, setSort] = useState<{ key: string; dir: 1 | -1 } | null>(
     defaultSort ? { key: defaultSort, dir: 1 } : null,
@@ -102,7 +105,8 @@ export function CrudTable<T extends Record<string, unknown>>({
         typeof x === "number" && typeof y === "number"
           ? x - y
           : String(x).localeCompare(String(y), "it", { numeric: true, sensitivity: "base" });
-      return cmp * sort.dir;
+      if (cmp !== 0 || !thenSortBy) return cmp * sort.dir;
+      return String(thenSortBy(a)).localeCompare(String(thenSortBy(b)), "it", { numeric: true, sensitivity: "base" });
     });
   }
 

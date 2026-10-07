@@ -117,13 +117,13 @@ def test_paired_classes_scheduled_with_shared_teacher():
     """
     assegnazioni = [
         AssegnazioneDati("a1", "d1", "Prof Rossi", "ASSUNTO", "c1", "1A", "m1", "Matematica",
-                          "TEORIA", "ALTO", ore_residue=20),
+                          "TEORIA", "ALTO", ore_residue=30),
         AssegnazioneDati("a2", "d1", "Prof Rossi", "ASSUNTO", "c2", "1B", "m1", "Matematica",
-                          "TEORIA", "ALTO", ore_residue=20),
+                          "TEORIA", "ALTO", ore_residue=30),
     ]
     ctx = _minimal_context(
         assegnazioni=assegnazioni,
-        classi_accoppiate=[("c1", "c2", "m1")],
+        classi_accoppiate=[("c1", "c2", "m1", "d1")],
         classi_set={"c1", "c2"},
     )
     solver = ScheduleSolver(ctx)
@@ -464,3 +464,53 @@ def test_paired_hours_cap_is_relaxed_only_with_a_visible_conflict():
     assert solver.solve(timeout_seconds=30) in ("OPTIMAL", "FEASIBLE")
     conflicts = [c for c in solver.get_conflicts() if c["kind"] == "paired_hours_override"]
     assert conflicts and all(c["suggested_action"]["action_type"] == "authorize_paired_hours" for c in conflicts)
+
+
+def test_same_docente_avoids_consecutive_hours_on_the_same_pair():
+    """Due docenti coprono la stessa coppia: le ore in comune si alternano, lo stesso
+    docente non ha due ore di fila con la stessa coppia (finché c'è un'alternativa)."""
+    solver = ScheduleSolver(_paired_hours_ctx())
+    solver.build_model()
+    assert solver.solve(timeout_seconds=30) in ("OPTIMAL", "FEASIBLE")
+
+    joint = {}
+    for s in solver.extract_solution():
+        if s.get("classe_accoppiata_id") and s["classe_id"] == "c1":
+            joint.setdefault((s["docente_id"], s["giorno"]), []).append(s["ora_inizio"])
+    for (docente, giorno), ore in joint.items():
+        ore.sort()
+        assert all(b - a > 1 for a, b in zip(ore, ore[1:])), f"{docente} {giorno}: ore di fila {ore}"
+    assert not [c for c in solver.get_conflicts() if c["kind"] == "paired_consecutive"]
+
+
+def test_consecutive_pair_hours_are_reported_when_no_other_docente_exists():
+    ass = [
+        AssegnazioneDati("a1", "d1", "Prof Rossi", "ASSUNTO", "c1", "1A", "m1", "Pratica", "TEORIA", "ALTO", ore_residue=30),
+        AssegnazioneDati("a2", "d1", "Prof Rossi", "ASSUNTO", "c2", "1B", "m1", "Pratica", "TEORIA", "ALTO", ore_residue=30),
+    ]
+    ctx = _minimal_context(assegnazioni=ass, classi_accoppiate=[("c1", "c2", "m1", "d1")], classi_set={"c1", "c2"})
+    solver = ScheduleSolver(ctx)
+    solver.build_model()
+    assert solver.solve(timeout_seconds=30) in ("OPTIMAL", "FEASIBLE")
+    assert [c for c in solver.get_conflicts() if c["kind"] == "paired_consecutive"]
+
+
+def test_contractor_can_give_joint_lessons():
+    """Un docente a contratto può fare lezioni in coppia: il conteggio dei buchi non deve
+    contare due volte la stessa ora (lato A + lato B) e rendere il modello impossibile."""
+    ass = [
+        AssegnazioneDati("a1", "d1", "Prof Rossi", "CONTRATTO", "c1", "1A", "m1", "Pratica", "TEORIA", "ALTO", ore_residue=60),
+        AssegnazioneDati("a2", "d1", "Prof Rossi", "CONTRATTO", "c2", "1B", "m1", "Pratica", "TEORIA", "ALTO", ore_residue=60),
+        AssegnazioneDati("a3", "d2", "Prof Verdi", "ASSUNTO", "c1", "1A", "m2", "Altro", "TEORIA", "ALTO", ore_residue=240),
+        AssegnazioneDati("a4", "d3", "Prof Neri", "ASSUNTO", "c2", "1B", "m2", "Altro", "TEORIA", "ALTO", ore_residue=240),
+    ]
+    ctx = _minimal_context(
+        assegnazioni=ass, classi_accoppiate=[("c1", "c2", "m1", "d1")], classi_set={"c1", "c2"},
+        docenti_map={"d1": "CONTRATTO", "d2": "ASSUNTO", "d3": "ASSUNTO"},
+        materie_map={"m1": "TEORIA", "m2": "TEORIA"},
+        disponibilita_map={"d1": DisponibilitaDati("d1", _full_availability())},
+    )
+    solver = ScheduleSolver(ctx)
+    solver.build_model()
+    assert solver.solve(timeout_seconds=30) in ("OPTIMAL", "FEASIBLE")
+    assert [s for s in solver.extract_solution() if s["docente_id"] == "d1"], "il contratto deve poter fare le coppie"

@@ -22,6 +22,7 @@ DEFAULT_SOFT_WEIGHTS: Dict[str, int] = {
     "ore_target_deviation": 15,
     "contractor_gap": 150,
     "single_classe_day": 10,
+    "paired_consecutive": 150,
 }
 
 # Keeps every tunable soft constraint well under RELAX_WEIGHT (1000), so a
@@ -55,6 +56,10 @@ MOTIVO_CONSTRAINTS: Dict[str, MotivoConstraint] = {
     "single_classe_day": MotivoConstraint(
         ("single_classe_day",), "single_classe_day",
         "Soft: discourages a docente's whole day on a single classe.",
+    ),
+    "paired_consecutive": MotivoConstraint(
+        ("paired_consecutive",), "paired_consecutive",
+        "Soft: the same docente shouldn't give consecutive joint hours to the same pair of classes.",
     ),
     "ore_target_deviation": MotivoConstraint(
         ("ore_target_deviation", "monte_ore_exceeded"), "ore_target_deviation",

@@ -93,8 +93,10 @@ export interface Assignment {
   materia_id: string;
   ore_totali: number;
   ore_erogate?: number;
-  partner_classe_id?: string | null;
-  partner_assignment_id?: string | null;
+  /** Altre classi del gruppo accoppiato (vuoto/assente = singola). */
+  partner_classe_ids?: string[];
+  /** Assegnazioni già presenti delle altre classi del gruppo. */
+  partner_assignment_ids?: string[];
 }
 
 export interface ClassPairing {

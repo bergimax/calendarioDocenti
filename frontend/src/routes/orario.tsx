@@ -14,6 +14,7 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { API_BASE_URL, api, apiBlob, apiErrorMessage, isSegreteria } from "@/lib/api";
+import { annoClasse } from "@/lib/classi";
 import { weekLabel, weekLabelFor } from "@/lib/weeks";
 import type {
   ChatMessage,
@@ -31,13 +32,10 @@ import type {
 // "PAN." (not the full "PAN. E PAST.") because one class in the DB is named
 // "III PAN. E PAST" without the trailing period - see classe_sort test.
 const CORSO_ORDER = ["OP. INFORM.", "ELETTRICISTI", "ESTETISTE", "PAN.", "I.T.C."];
-const ANNO_ORDER: Record<string, number> = { IV: 4, III: 3, II: 2, I: 1 };
 
 function classeSortKey(nome: string): [number, number] {
   const corsoIdx = CORSO_ORDER.findIndex((c) => nome.includes(c));
-  const annoMatch = nome.match(/^(IV|III|II|I)\b/);
-  const annoIdx = annoMatch?.[1] ? (ANNO_ORDER[annoMatch[1]] ?? 99) : 99;
-  return [corsoIdx === -1 ? CORSO_ORDER.length : corsoIdx, annoIdx];
+  return [corsoIdx === -1 ? CORSO_ORDER.length : corsoIdx, annoClasse(nome)];
 }
 
 function sortClassi<T extends { nome: string }>(classi: T[]): T[] {
@@ -170,6 +168,8 @@ type ScheduleMutationResult = Schedule & {
   message?: string;
   conflicting_constraints?: string[];
   suggested_deroghe?: string[];
+  /** status "needs_confirmation": le regole che l'assegnazione forzerebbe. */
+  regole?: { kind?: string; description: string }[];
 };
 
 // "infeasible" and "timeout" also come back as HTTP 200 with no slots, so
@@ -1104,6 +1104,8 @@ function AssignSlotPanel({
   const [choice, setChoice] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
+  // regole che l'assegnazione forzerebbe: l'admin deve confermare prima che si salvi
+  const [pending, setPending] = useState<{ description: string }[] | null>(null);
 
   const options = useQuery({
     queryKey: ["assignable", week, cell.classe_id],
@@ -1123,7 +1125,7 @@ function AssignSlotPanel({
   const list = options.data?.options ?? [];
   const selected = choice || (list[0] ? `${list[0].docente_id}|${list[0].materia_id}` : "");
 
-  async function submit() {
+  async function submit(confirm = false) {
     const [docente_id, materia_id] = selected.split("|");
     setBusy(true);
     setError(null);
@@ -1136,8 +1138,14 @@ function AssignSlotPanel({
           ora_inizio: cell.ora,
           docente_id,
           materia_id,
+          confirm,
         },
       });
+      if (res.status === "needs_confirmation") {
+        setPending(res.regole ?? []);
+        return;
+      }
+      setPending(null);
       onAssigned(requireSchedule(res), res.message);
     } catch (err) {
       setError(err);
@@ -1158,7 +1166,14 @@ function AssignSlotPanel({
         {cell.classe_nome} · {GIORNI.find((g) => g.value === cell.giorno)?.label ?? cell.giorno} ·{" "}
         {String(cell.ora).padStart(2, "0")}:00
       </p>
-      <Select label="Docente e materia" value={selected} onChange={(e) => setChoice(e.target.value)}>
+      <Select
+        label="Docente e tipo (in coppia / singola)"
+        value={selected}
+        onChange={(e) => {
+          setChoice(e.target.value);
+          setPending(null);
+        }}
+      >
         {list.map((o) => (
           <option key={`${o.docente_id}|${o.materia_id}`} value={`${o.docente_id}|${o.materia_id}`}>
             {o.docente_nome} · {o.materia_nome} ({o.ore_residue}h residue)
@@ -1167,9 +1182,31 @@ function AssignSlotPanel({
       </Select>
       {options.isError ? <p className="text-[11px] text-conflict">{apiErrorMessage(options.error)}</p> : null}
       {error ? <p className="text-[11px] text-conflict">{apiErrorMessage(error)}</p> : null}
-      <Button variant="primary" className="w-full" onClick={submit} disabled={busy || !selected}>
-        {busy ? "Assegno…" : "Forza assegnazione"}
-      </Button>
+      {pending ? (
+        <div className="space-y-2 rounded-lg border border-conflict/40 bg-conflict/5 p-2">
+          <p className="text-[11px] font-semibold text-conflict">
+            Questa assegnazione forza {pending.length === 1 ? "una regola" : "delle regole"}:
+          </p>
+          <ul className="list-disc space-y-1 pl-4 text-[11px]">
+            {pending.map((r, i) => (
+              <li key={i}>{r.description}</li>
+            ))}
+          </ul>
+          <p className="text-[11px] text-muted-foreground">Vuoi forzarla comunque?</p>
+          <div className="flex gap-2">
+            <Button variant="primary" className="flex-1" onClick={() => void submit(true)} disabled={busy}>
+              {busy ? "Assegno…" : "Forza comunque"}
+            </Button>
+            <Button className="flex-1" onClick={() => setPending(null)} disabled={busy}>
+              Annulla
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <Button variant="primary" className="w-full" onClick={() => void submit(false)} disabled={busy || !selected}>
+          {busy ? "Controllo…" : "Assegna"}
+        </Button>
+      )}
     </div>
   );
 }

@@ -564,3 +564,49 @@ def test_next_weeks_residual_hours_drop_after_approval(client, school_setup):
     n_slots = len(client.get(f"/api/schedule/{week}").json()["slots"])
     client.post(f"/api/schedule/{week}/approve")
     assert residue_total() == total_before - n_slots
+
+
+def test_assign_slot_asks_confirmation_before_forcing_a_rule(client, school_setup, monkeypatch):
+    """Una forzatura che rompe una regola non si salva da sola: l'API dice quale regola e
+    aspetta la conferma dell'admin; con confirm=True esegue."""
+    from app.domain.solver import ScheduleSolver
+
+    week = school_setup["week_start"]
+    slots = _generated_slots(client, week)
+    target = next(s for s in slots if not s["accoppiata"])
+    n_before = len(slots)
+
+    # libero l'ora della lezione e provo a rimetterla (stesso docente e tipo)
+    r = client.post(f"/api/schedule/{week}/conflicts/reject", json={
+        "classe_id": target["classe_id"], "giorno": target["giorno"], "ora_inizio": target["ora_inizio"],
+    })
+    assert r.status_code == 200 and len(r.json()["slots"]) == n_before - 1
+
+    original = ScheduleSolver.get_conflicts
+    calls = {"n": 0}
+
+    def with_forced_rule(self):
+        # solo la prima valutazione (quella con la nuova lezione) ha la regola di prova:
+        # la seconda è lo stato "prima" dell'orario, che non ce l'ha
+        calls["n"] += 1
+        return original(self) + ([] if calls["n"] > 1 else [{
+            "conflict_id": "x", "chiave": "paired_hours_override|x|y|LUNEDI", "kind": "paired_hours_override",
+            "description": "Regola di prova forzata", "avviso": False,
+            "classe_id": target["classe_id"], "docente_id": target["docente_id"], "giorno": "LUNEDI",
+        }])
+
+    monkeypatch.setattr(ScheduleSolver, "get_conflicts", with_forced_rule)
+    body = {
+        "classe_id": target["classe_id"], "giorno": target["giorno"], "ora_inizio": target["ora_inizio"],
+        "docente_id": target["docente_id"], "materia_id": target["materia_id"],
+    }
+
+    asked = client.post(f"/api/schedule/{week}/assign-slot", json=body).json()
+    assert asked["status"] == "needs_confirmation", asked
+    assert [r["description"] for r in asked["regole"]] == ["Regola di prova forzata"]
+    # non è stato salvato nulla
+    assert len(client.get(f"/api/schedule/{week}").json()["slots"]) == n_before - 1
+
+    done = client.post(f"/api/schedule/{week}/assign-slot", json={**body, "confirm": True}).json()
+    assert done.get("status") != "needs_confirmation" and done.get("status") != "error", done
+    assert len(client.get(f"/api/schedule/{week}").json()["slots"]) == n_before

@@ -11,6 +11,13 @@ Base.metadata.create_all(bind=engine)
 ensure_admin_role_column()
 ensure_assegnazione_singola_column()
 
+# Dati esistenti -> modello docente+classe+tipo (in coppia / singola), idempotente
+from app.database import SessionLocal  # noqa: E402
+from app.services.tipo_lezione import normalize_tipo_lezione  # noqa: E402
+
+with SessionLocal() as _db:
+    normalize_tipo_lezione(_db)
+
 # Initialize FastAPI
 app = FastAPI(
     title=settings.API_TITLE,

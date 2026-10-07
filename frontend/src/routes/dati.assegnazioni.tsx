@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { CrudTable } from "@/components/CrudTable";
 import { Field, Select } from "@/components/ui-kit";
 import { api } from "@/lib/api";
+import { classeSortValue, sortClassiByNome } from "@/lib/classi";
 import type { Assignment, ClassPairing, SchoolClass, Teacher } from "@/lib/types";
 
 export const Route = createFileRoute("/dati/assegnazioni")({
@@ -23,10 +24,36 @@ function AssignmentsPage() {
   const className = (id: unknown) =>
     classes.data?.find((c) => c.classe_id === id)?.nome ?? String(id ?? "—");
 
-  // Una coppia è una sola riga (mostrata sulla assegnazione con id minore); il
-  // backend applica modifiche ed eliminazione a entrambe le classi.
+  // Un gruppo accoppiato (2-4 classi) è una sola riga, mostrata sulla assegnazione con id
+  // minore; il backend applica modifiche ed eliminazione a tutte le classi del gruppo.
   const isSecondOfPair = (r: Assignment) =>
-    Boolean(r.partner_assignment_id) && r.assignment_id > (r.partner_assignment_id ?? "");
+    (r.partner_assignment_ids ?? []).some((id) => id < r.assignment_id);
+
+  // "IV Elettricisti + IV Estetiste + ..." in ordine di anno e nome
+  const groupName = (ids: string[]) =>
+    sortClassiByNome(ids.map((id) => ({ nome: className(id) })))
+      .map((c) => c.nome)
+      .join(" + ");
+
+  // Gruppi di classi collegate dagli accoppiamenti del docente (o senza docente), per tipo (in coppia):
+  // 3-4 classi accoppiate tra loro sono una sola scelta.
+  const pairGroups = (docenteId: string) => {
+    const rows = (pairings.data ?? []).filter((p) => !p.docente_id || p.docente_id === docenteId);
+    const groups: { key: string; materia: string; classi: Set<string> }[] = [];
+    for (const p of rows) {
+      const hit = groups.filter(
+        (g) => g.materia === p.materia_id && (g.classi.has(p.classe_a_id) || g.classi.has(p.classe_b_id)),
+      );
+      const merged = hit[0] ?? { key: p.pairing_id, materia: p.materia_id, classi: new Set<string>() };
+      for (const other of hit.slice(1)) {
+        other.classi.forEach((c) => merged.classi.add(c));
+        groups.splice(groups.indexOf(other), 1);
+      }
+      merged.classi.add(p.classe_a_id).add(p.classe_b_id);
+      if (!hit[0]) groups.push(merged);
+    }
+    return groups;
+  };
 
   return (
     <CrudTable<Assignment & Record<string, unknown>>
@@ -36,6 +63,7 @@ function AssignmentsPage() {
       newTitle="Nuova assegnazione"
       hideRow={isSecondOfPair}
       defaultSort="docente"
+      thenSortBy={(r) => classeSortValue(className(r.classe_id))}
       emptyHint="Nessuna assegnazione restituita dal server."
       columns={[
         {
@@ -47,13 +75,14 @@ function AssignmentsPage() {
         {
           key: "classe",
           header: "Classe",
-          sortValue: (r) => className(r.classe_id),
-          render: (r) =>
-            r.partner_classe_id
-              ? `${className(r.classe_id)} + ${className(r.partner_classe_id)}`
-              : className(r.classe_id),
+          sortValue: (r) => classeSortValue(className(r.classe_id)),
+          render: (r) => groupName([r.classe_id, ...(r.partner_classe_ids ?? [])]),
         },
-        { key: "tipo", header: "Tipo", render: (r) => (r.partner_classe_id ? "Accoppiata" : "Singola") },
+        {
+          key: "tipo",
+          header: "Tipo",
+          render: (r) => (r.partner_classe_ids?.length ? "Accoppiata" : "Singola"),
+        },
         { key: "ore_totali", header: "Ore totali", render: (r) => r.ore_totali },
         { key: "ore_fatte", header: "Ore fatte", render: (r) => r.ore_erogate ?? 0 },
         {
@@ -83,9 +112,7 @@ function AssignmentsPage() {
             const editing = Boolean(value["assignment_id"]);
             const docenteId = value["docente_id"] ?? "";
             // Accoppiamenti del docente scelto (o senza docente specifico).
-            const pairs = editing
-              ? []
-              : (pairings.data ?? []).filter((p) => !p.docente_id || p.docente_id === docenteId);
+            const pairs = editing ? [] : pairGroups(docenteId);
             const selected = value["accoppiamento_id"]
               ? `pair:${value["accoppiamento_id"]}`
               : (value["classe_id"] ?? "");
@@ -107,15 +134,15 @@ function AssignmentsPage() {
                 <option value="">Seleziona…</option>
                 {pairs.length > 0 ? (
                   <optgroup label="Classi accoppiate">
-                    {pairs.map((p) => (
-                      <option key={p.pairing_id} value={`pair:${p.pairing_id}`}>
-                        {className(p.classe_a_id)} + {className(p.classe_b_id)}
+                    {pairs.map((g) => (
+                      <option key={g.key} value={`pair:${g.key}`}>
+                        {groupName([...g.classi])}
                       </option>
                     ))}
                   </optgroup>
                 ) : null}
                 <optgroup label="Classi singole">
-                  {(classes.data ?? []).map((c) => (
+                  {sortClassiByNome(classes.data).map((c) => (
                     <option key={c.classe_id} value={c.classe_id}>
                       {c.nome}
                     </option>
