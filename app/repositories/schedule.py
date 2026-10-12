@@ -154,6 +154,28 @@ class ScheduleRepository:
                 )
                 calendario.append(cal_data)
 
+        # Whole remaining calendar (weekdays) for the weekly hours target
+        residuo_list = self.db.query(CalendarioAnnuale).filter(
+            and_(
+                CalendarioAnnuale.scuola_id == scuola_id,
+                CalendarioAnnuale.data >= week_start,
+                CalendarioAnnuale.data <= anno_fine,
+            )
+        ).all()
+        calendario_residuo = [
+            CalendarioDati(
+                data=cal.data,
+                giorno=cal.data.weekday(),
+                ore_max_giornata=cal.ore_max_giornata,
+                gruppo=cal.gruppo,
+                flag_stage_classe_id=stage_resolver(cal.flag_stage_classe_id),
+                flag_stage_gruppo=bool(cal.flag_stage_gruppo),
+                flag_chiusura=bool(cal.flag_chiusura),
+            )
+            for cal in residuo_list
+            if cal.data.weekday() < 5
+        ]
+
         # Fill missing days
         for giorno in range(5):
             if not any(c.giorno == giorno for c in calendario):
@@ -205,6 +227,7 @@ class ScheduleRepository:
             classi_set=classi_set,
             materie_map=materie_map,
             classi_gruppo=classi_gruppo,
+            calendario_residuo=calendario_residuo,
         )
 
     def save_generated_schedule(

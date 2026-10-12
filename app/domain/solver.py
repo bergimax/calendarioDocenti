@@ -95,10 +95,15 @@ class ScheduleContext:
     classi_set: Set[str]  # all classe_ids
     materie_map: Dict[str, str]  # materia_id -> materia_tipo
     classi_gruppo: Dict[str, Optional[str]] = None  # classe_id -> gruppo (year-group label)
+    # Calendar from week_start to anno_fine (all weekdays): lets the weekly hours
+    # target count only the days a classe really has lessons (no stage/closure).
+    calendario_residuo: List[CalendarioDati] = None
 
     def __post_init__(self):
         if self.classi_gruppo is None:
             self.classi_gruppo = {}
+        if self.calendario_residuo is None:
+            self.calendario_residuo = []
 
 
 @dataclass
@@ -1344,6 +1349,32 @@ class ScheduleSolver:
         )
         return 1.5 - min(free, total) / total
 
+    def _settimane_utili(self, classe_id: str, fallback: int) -> float:
+        """
+        Remaining school weeks (from this week to the end of the anno) in which
+        the classe actually has lessons, as lesson days / 5. Closures, stage
+        (classe or whole gruppo) and 0-hour days don't count: the classe has no
+        docente hours then, so the residual hours must be spread over fewer weeks.
+        """
+        righe = self.context.calendario_residuo
+        if not righe:
+            return fallback
+        gruppo = self.context.classi_gruppo.get(classe_id)
+        per_data: Dict[date, CalendarioDati] = {}
+        for c in righe:
+            if gruppo is not None and c.gruppo == gruppo:
+                per_data[c.data] = c
+            elif c.gruppo is None and c.data not in per_data:
+                per_data[c.data] = c
+        giorni = 0
+        for c in per_data.values():
+            if c.flag_chiusura or c.ore_max_giornata == 0 or c.flag_stage_gruppo:
+                continue
+            if c.flag_stage_classe_id == classe_id:
+                continue
+            giorni += 1
+        return max(giorni / 5, 1)
+
     def _soft_ore_target_deviation(self) -> None:
         """Soft: Minimize deviation from target hours per assegnazione (weight 15)."""
         # Weekly hours must match the target exactly (admin decision): every
@@ -1372,7 +1403,8 @@ class ScheduleSolver:
                 continue
 
             # Target: spread residual hours evenly across remaining weeks
-            ore_target = max(1, asg.ore_residue // weeks_in_year)
+            weeks_asg = self._settimane_utili(asg.classe_id, weeks_in_year)
+            ore_target = max(1, int(asg.ore_residue // weeks_asg))
 
             # Deroga: "Riduci ore docente a contratto" - cap this week's
             # target for the affected CONTRATTO docente(i) at the
@@ -1390,10 +1422,10 @@ class ScheduleSolver:
                 )
 
             target_detail = (
-                f"monte ore residuo {asg.ore_residue}h su {weeks_in_year} "
-                f"settiman{'a' if weeks_in_year == 1 else 'e'} rimanenti"
+                f"monte ore residuo {asg.ore_residue}h su {weeks_asg:g} "
+                f"settiman{'a' if weeks_asg == 1 else 'e'} di lezione rimanenti"
             )
-            if ore_target != max(1, asg.ore_residue // weeks_in_year):
+            if ore_target != max(1, int(asg.ore_residue // weeks_asg)):
                 target_detail += (
                     f", limitato a {ore_target}h dalla deroga sulle ore a contratto"
                     if self.deroga and self.deroga.max_hours
