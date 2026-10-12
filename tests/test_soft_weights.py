@@ -11,7 +11,7 @@ from app.domain.soft_weights import (
 )
 from app.services.feedback import MOTIVI
 from tests.test_solver import _minimal_context
-from app.domain.solver import ScheduleSolver
+from app.domain.solver import TEORIA_CONSECUTIVE_WEIGHT, ScheduleSolver
 
 SOLVER_SRC = (Path(__file__).parent.parent / "app" / "domain" / "solver.py").read_text()
 
@@ -62,13 +62,13 @@ def test_solver_uses_default_weights_unless_overridden():
     base.build_model()
     by_kind = _weights_by_kind(base)
     # documented defaults (contractor_gap is spread over 6 hours: weight // 6)
-    assert by_kind["teoria_consecutive"] == {DEFAULT_SOFT_WEIGHTS["teoria_consecutive"]}
+    assert by_kind["teoria_consecutive"] == {TEORIA_CONSECUTIVE_WEIGHT + DEFAULT_SOFT_WEIGHTS["teoria_consecutive"]}
     if "contractor_gap" in by_kind:
         assert by_kind["contractor_gap"] == {DEFAULT_SOFT_WEIGHTS["contractor_gap"] // 6}
 
     tuned = ScheduleSolver(_minimal_context(), soft_weights={"teoria_consecutive": 40})
     tuned.build_model()
-    assert _weights_by_kind(tuned)["teoria_consecutive"] == {40}
+    assert _weights_by_kind(tuned)["teoria_consecutive"] == {TEORIA_CONSECUTIVE_WEIGHT + 40}
     # the other constraints are unchanged
     for kind, w in by_kind.items():
         if kind != "teoria_consecutive":

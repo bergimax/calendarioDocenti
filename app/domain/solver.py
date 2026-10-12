@@ -12,6 +12,12 @@ logger = logging.getLogger(__name__)
 # Per hour of deviation from a docente's weekly target (see _soft_ore_target_deviation).
 EXACT_TARGET_WEIGHT = 500
 
+# Per window of 3 hours exceeding the max consecutive hours of the same docente
+# with the same classe (see _soft_teoria_consecutive). Admin rule: never more than
+# 2 in a row, so it outweighs the exact weekly target; only the force_3_hours_theory
+# deroga (or the chat cap) raises the limit.
+TEORIA_CONSECUTIVE_WEIGHT = 3000
+
 GIORNI_NOMI_IT = {
     "LUNEDI": "Lunedì", "MARTEDI": "Martedì", "MERCOLEDI": "Mercoledì",
     "GIOVEDI": "Giovedì", "VENERDI": "Venerdì",
@@ -1181,7 +1187,7 @@ class ScheduleSolver:
         a teacher handoff is its own natural break, the same as a subject
         change would be, so it shouldn't count toward the same run.
         """
-        weight = self._soft_weights["teoria_consecutive"]
+        weight = TEORIA_CONSECUTIVE_WEIGHT + self._soft_weights["teoria_consecutive"]
 
         teoria_asgs = [asg for asg in self.context.assegnazioni if asg.materia_tipo == "TEORIA"]
 

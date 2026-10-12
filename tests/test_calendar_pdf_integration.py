@@ -118,10 +118,19 @@ def test_pdf_calendar_drives_per_class_day_capacity(client):
         if gruppo == "PRIME":
             assert n <= 2, f"1 Prima exceeded its PDF-derived 2h/day cap on {giorno}: {n}"
 
-    # ...and SECONDE, with a higher cap (6h/day), must be able to use more
-    # hours than PRIME's cap would allow, proving the two aren't sharing one
-    # school-wide value.
-    max_seconda_day = max(
-        (n for (_, gruppo), n in hours_by_day.items() if gruppo == "SECONDE"), default=0
-    )
-    assert max_seconda_day > 2
+    # ...and SECONDE, with a higher cap (6h/day), must get a higher daily cap
+    # than PRIME's, proving the two aren't sharing one school-wide value. (The
+    # generated hours can't show it any more: a docente is never given more than
+    # 2 consecutive hours with the same classe, so both classi end up at 2h/day.)
+    from datetime import date
+    from app.domain.solver import ScheduleSolver
+    from app.repositories.schedule import ScheduleRepository
+
+    db = SessionLocal()
+    try:
+        ctx = ScheduleRepository(db).get_week_context("sch_1", date(2026, 10, 5))
+    finally:
+        db.close()
+    solver = ScheduleSolver(ctx)
+    assert max(solver._ore_max_for_classe_giorno(seconda_id, g) for g in range(5)) > 2
+    assert max(solver._ore_max_for_classe_giorno(prima_id, g) for g in range(5)) <= 2
