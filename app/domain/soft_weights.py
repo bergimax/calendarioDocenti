@@ -77,6 +77,10 @@ MOTIVO_CONSTRAINTS: Dict[str, MotivoConstraint] = {
         ("pratica_block_override",), None,
         "Relaxable-hard: fix with authorize_short_pratica_block, not a weight.",
     ),
+    "contract_min_hours": MotivoConstraint(
+        ("contract_min_hours_override",), None,
+        "Relaxable-hard: fix with authorize_short_contract_day, not a weight.",
+    ),
     "classe_unfilled": MotivoConstraint(
         ("classe_unfilled", "classe_over_capacity"), None,
         "Fixed above RELAX_WEIGHT: an empty classroom hour is never traded for a preference.",

@@ -124,6 +124,13 @@ const QUICK_ACTIONS: {
     fields: ["docente"],
   },
   {
+    action_type: "authorize_short_contract_day",
+    label: "Autorizza giornata breve",
+    description:
+      "Permette a un docente a contratto di lavorare meno di 3 ore in una giornata.",
+    fields: ["docente"],
+  },
+  {
     action_type: "override_availability",
     label: "Deroga disponibilità",
     description: "Ignora, solo per questa settimana, la disponibilità dichiarata dal docente.",

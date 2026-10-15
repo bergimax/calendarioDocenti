@@ -544,3 +544,45 @@ def test_joint_lesson_counts_once_for_target_and_continuity():
     assert len(targets) == 1, f"un obiettivo per gruppo, non uno per classe: {len(targets)}"
     consecutive = [p for p in solver.soft_penalties if p.kind == "paired_consecutive"]
     assert len(consecutive) == 5 * 5, f"una penalità per gruppo, giorno e coppia di ore: {len(consecutive)}"
+
+
+def _two_docenti_one_classe(residue_a, residue_b):
+    asgs = [
+        AssegnazioneDati("a1", "d1", "Prof Rossi", "ASSUNTO", "c1", "1A", "m1", "Matematica",
+                         "TEORIA", "ALTO", ore_residue=residue_a),
+        AssegnazioneDati("a2", "d2", "Prof Bianchi", "ASSUNTO", "c1", "1A", "m2", "Storia",
+                         "TEORIA", "ALTO", ore_residue=residue_b),
+    ]
+    return _minimal_context(
+        assegnazioni=asgs, docenti_map={"d1": "ASSUNTO", "d2": "ASSUNTO"},
+        materie_map={"m1": "TEORIA", "m2": "TEORIA"},
+    )
+
+
+def _target_penalties(solver):
+    return [p for p in solver.soft_penalties if p.kind == "ore_target_deviation"]
+
+
+def test_one_hour_off_the_weekly_target_is_free():
+    # Targets 16h + 14h = 30h (the classe's capacity); the cap forces 15h + 15h: each one hour off.
+    ctx = _two_docenti_one_classe(16 * 12, 14 * 12)
+    solver = ScheduleSolver(ctx, max_hours_per_docente={"d1": 15}).build_model()
+    assert solver.solve(timeout_seconds=20) in ("OPTIMAL", "FEASIBLE")
+    assert all(solver.solver.Value(p.var) == 0 for p in _target_penalties(solver))
+    assert not [c for c in solver.get_conflicts() if c.get("chiave", "").startswith("ore_target_deviation")]
+
+
+def test_two_hours_off_the_weekly_target_is_still_penalized():
+    ctx = _two_docenti_one_classe(17 * 12, 13 * 12)
+    solver = ScheduleSolver(ctx, max_hours_per_docente={"d1": 15}).build_model()
+    assert solver.solve(timeout_seconds=20) in ("OPTIMAL", "FEASIBLE")
+    assert any(solver.solver.Value(p.var) > 0 for p in _target_penalties(solver))
+
+
+def test_targets_are_scaled_down_to_the_classe_weekly_capacity():
+    # 24h + 24h of target for a classe with 30h of lessons: unscaled, no timetable could meet them.
+    ctx = _two_docenti_one_classe(24 * 12, 24 * 12)
+    solver = ScheduleSolver(ctx).build_model()
+    assert solver.solve(timeout_seconds=20) in ("OPTIMAL", "FEASIBLE")
+    assert sorted(p.ore_target for p in _target_penalties(solver)) == [15, 15]
+    assert all(solver.solver.Value(p.var) == 0 for p in _target_penalties(solver))

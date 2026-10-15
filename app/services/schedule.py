@@ -19,6 +19,7 @@ QUICK_ACTIONS = {
     "authorize_friday_late_start",
     "authorize_short_pratica_block",
     "authorize_paired_hours",
+    "authorize_short_contract_day",
 }
 
 

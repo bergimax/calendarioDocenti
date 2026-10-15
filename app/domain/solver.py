@@ -12,6 +12,10 @@ logger = logging.getLogger(__name__)
 # Per hour of deviation from a docente's weekly target (see _soft_ore_target_deviation).
 EXACT_TARGET_WEIGHT = 500
 
+# Hours of deviation from the weekly target that cost nothing: +-1h around the target is accepted
+# (benchmark 2026-10-15, SPECIFICHE_SOLVER.md 1b: ~15% fewer broken "max 1 paired hour a day" rules).
+TARGET_TOLERANCE_HOURS = 1
+
 # Per window of 3 hours exceeding the max consecutive hours of the same docente
 # with the same classe (see _soft_teoria_consecutive). Admin rule: never more than
 # 2 in a row, so it outweighs the exact weekly target; only the force_3_hours_theory
@@ -308,6 +312,11 @@ class ScheduleSolver:
         # none at all (relaxable at an extreme weight, see
         # _constraint_pratica_block_min_3h's docstring)
         self._constraint_pratica_block_min_3h()
+
+        # Hard 2e-bis: a CONTRATTO docente who works a day works at least
+        # min(3, hours available that day) hours (relaxable, see
+        # _constraint_contract_min_3h_per_day's docstring)
+        self._constraint_contract_min_3h_per_day()
 
         # Hard 2f: a docente never has more than 1 joint (paired-classes) hour
         # per day (relaxable at an extreme weight, see
@@ -1236,6 +1245,79 @@ class ScheduleSolver:
                             suggested_action={"action_type": "force_3_hours_theory", "label": "Forza 3 ore teoria"},
                         ))
 
+    def _constraint_contract_min_3h_per_day(self) -> None:
+        """
+        Relaxable-hard: a CONTRATTO docente who teaches on a day teaches at
+        least min(3, hours available that day) hours - admin decision
+        (2026-10-15): "minimo 3 ore se la disponibilità lo consente; se la
+        disponibilità è minore di 3 ore, allora non importa".
+
+        Same relaxable-hard pattern as _constraint_pratica_block_min_3h: an
+        override bool per (docente, giorno) at RELAX_WEIGHT (1000) so the
+        rule only breaks when truly unavoidable, surfaced by get_conflicts()
+        with the "authorize_short_contract_day" deroga (scoped to the
+        docente). Paired lessons count once.
+        """
+        RELAX_WEIGHT = 1000
+        MIN_HOURS = 3
+        giorni_nomi = ["lunedi", "martedi", "mercoledi", "giovedi", "venerdi"]
+        skip_ids = self._paired_assignment_ids_to_dedupe()
+
+        asgs_by_docente: Dict[str, List[AssegnazioneDati]] = {}
+        for asg in self.context.assegnazioni:
+            if self.context.docenti_map.get(asg.docente_id) == "CONTRATTO" and asg.assegnazione_id not in skip_ids:
+                asgs_by_docente.setdefault(asg.docente_id, []).append(asg)
+
+        for docente_id, asgs in asgs_by_docente.items():
+            if self._deroga_active("authorize_short_contract_day", docente_id=docente_id):
+                continue
+            # A docente with no recorded availability is unavailable all week
+            # (see _constraint_teacher_availability): nothing to require.
+            disponibilita = self.context.disponibilita_map.get(docente_id)
+            if not disponibilita or self._deroga_active("override_availability", docente_id=docente_id):
+                continue
+
+            for giorno in range(5):
+                unavailable: set = set()
+                for slot in disponibilita.giorni_fasce.get(giorni_nomi[giorno], []):
+                    if slot.get("disponibile", False):
+                        continue
+                    try:
+                        unavailable.add(int(slot["ora_inizio"].split(":")[0]) - 8)
+                    except (ValueError, KeyError):
+                        continue
+                required = min(MIN_HOURS, 6 - len([h for h in unavailable if 0 <= h < 6]))
+                if required < 1:
+                    continue
+
+                hours = [
+                    self.x[(a.assegnazione_id, giorno, ora)]
+                    for a in asgs for ora in range(6)
+                    if (a.assegnazione_id, giorno, ora) in self.x
+                ]
+                if len(hours) < required:
+                    continue
+
+                works = self.model.NewBoolVar(f"contract_works_{docente_id}_{giorno}")
+                self.model.Add(sum(hours) >= 1).OnlyEnforceIf(works)
+                self.model.Add(sum(hours) == 0).OnlyEnforceIf(works.Not())
+                relax = self.model.NewBoolVar(f"contract_min_override_{docente_id}_{giorno}")
+                self.model.Add(sum(hours) >= required).OnlyEnforceIf([works, relax.Not()])
+
+                self.soft_penalties.append(SoftPenalty(
+                    var=relax, weight=RELAX_WEIGHT, kind="contract_min_hours_override",
+                    description=(
+                        f"{asgs[0].docente_nome} (contratto) ha meno di {required} ore "
+                        f"({GIORNI_NOMI_IT[GiornoEnum(giorno).name]}): nessun'altra "
+                        "combinazione riempiva tutte le ore delle classi"
+                    ),
+                    docente_id=docente_id, giorno=giorno,
+                    suggested_action={
+                        "action_type": "authorize_short_contract_day",
+                        "label": "Autorizza giornata breve",
+                    },
+                ))
+
     def _constraint_pratica_block_min_3h(self) -> None:
         """
         Hard constraint 2e, but relaxable: PRATICA/laboratorio hours must
@@ -1381,6 +1463,24 @@ class ScheduleSolver:
             giorni += 1
         return max(giorni / 5, 1)
 
+    def _target_scale_by_classe(self, weeks_in_year: int) -> Dict[str, float]:
+        """
+        classe_id -> factor (<= 1) that brings the sum of the classe's weekly targets down to its
+        weekly capacity (sum of the day capacities). 1.0 when the targets already fit.
+        """
+        totals: Dict[str, int] = {}
+        for a in self.context.assegnazioni:
+            if a.ore_residue <= 0:
+                continue
+            weeks = self._settimane_utili(a.classe_id, weeks_in_year)
+            totals[a.classe_id] = totals.get(a.classe_id, 0) + max(1, int(a.ore_residue // weeks))
+        scale: Dict[str, float] = {}
+        for classe_id, total in totals.items():
+            capacity = sum(self._ore_max_for_classe_giorno(classe_id, g) for g in range(5))
+            if total > capacity > 0:
+                scale[classe_id] = capacity / total
+        return scale
+
     def _soft_ore_target_deviation(self) -> None:
         """Soft: Minimize deviation from target hours per assegnazione (weight 15)."""
         # Weekly hours must match the target exactly (admin decision): every
@@ -1397,6 +1497,7 @@ class ScheduleSolver:
         # A joint lesson is ONE hour of the group's shared monte ore: the "B" sides of a pair
         # (x_b == x_a) are the same hours, so they don't get a target of their own.
         skip_ids = self._paired_assignment_ids_to_dedupe()
+        target_scale = self._target_scale_by_classe(weeks_in_year)
 
         for asg in self.context.assegnazioni:
             if asg.assegnazione_id in skip_ids:
@@ -1411,6 +1512,9 @@ class ScheduleSolver:
             # Target: spread residual hours evenly across remaining weeks
             weeks_asg = self._settimane_utili(asg.classe_id, weeks_in_year)
             ore_target = max(1, int(asg.ore_residue // weeks_asg))
+            # Every classe room hour must be filled (H2), so the targets of one classe
+            # cannot add up to more than its weekly capacity: scale them down to it.
+            ore_target = max(1, round(ore_target * target_scale.get(asg.classe_id, 1.0)))
 
             # Deroga: "Riduci ore docente a contratto" - cap this week's
             # target for the affected CONTRATTO docente(i) at the
@@ -1431,7 +1535,9 @@ class ScheduleSolver:
                 f"monte ore residuo {asg.ore_residue}h su {weeks_asg:g} "
                 f"settiman{'a' if weeks_asg == 1 else 'e'} di lezione rimanenti"
             )
-            if ore_target != max(1, int(asg.ore_residue // weeks_asg)):
+            if ore_target != max(1, int(asg.ore_residue // weeks_asg)) and not (
+                target_scale.get(asg.classe_id, 1.0) < 1.0
+            ):
                 target_detail += (
                     f", limitato a {ore_target}h dalla deroga sulle ore a contratto"
                     if self.deroga and self.deroga.max_hours
@@ -1449,10 +1555,10 @@ class ScheduleSolver:
             if slots_for_asg:
                 ore_assigned = sum(slots_for_asg)
 
-                # Create deviation var: |ore_assigned - ore_target|
+                # Create deviation var: max(0, |ore_assigned - ore_target| - tolerance)
                 deviation = self.model.NewIntVar(0, max(asg.ore_residue, ore_target, 30), f"deviation_{asg.assegnazione_id}")
-                self.model.Add(deviation >= ore_assigned - ore_target)
-                self.model.Add(deviation >= ore_target - ore_assigned)
+                self.model.Add(deviation >= ore_assigned - ore_target - TARGET_TOLERANCE_HOURS)
+                self.model.Add(deviation >= ore_target - ore_assigned - TARGET_TOLERANCE_HOURS)
 
                 self.soft_penalties.append(SoftPenalty(
                     var=deviation,
@@ -1714,6 +1820,8 @@ class ScheduleSolver:
 
         self.solver = cp_model.CpSolver()
         self.solver.parameters.max_time_in_seconds = timeout_seconds
+        # Best-measured search setting (benchmark 2026-10-15): stronger LP relaxation.
+        self.solver.parameters.linearization_level = 2
 
         self.status = self.solver.Solve(self.model)
 

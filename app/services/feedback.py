@@ -16,6 +16,7 @@ MOTIVI: Dict[str, str] = {
     "paired_consecutive": "Stesso docente su ore consecutive della stessa coppia",
     "paired_hours": "Più ore in coppia nello stesso giorno per un docente",
     "pratica_block": "Blocchi di pratica spezzati o troppo corti",
+    "contract_min_hours": "Docenti a contratto con meno di 3 ore in una giornata",
     "contractor_gap": "Buchi (ore libere) nei docenti a contratto",
     "single_classe_day": "Docente tutto il giorno sulla stessa classe",
     "ore_target_deviation": "Ore settimanali lontane dal target",
