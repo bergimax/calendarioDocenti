@@ -152,7 +152,7 @@ class SoftPenalty:
     """
     var: Any  # cp_model IntVar; > 0 in the solution means this is violated
     weight: int
-    kind: str  # "teoria_consecutive" | "ore_target_deviation" | "contractor_gap" | "classe_late_start" | "availability_override" | "single_classe_day" | "friday_late_start_override" | "pratica_block_override" | "paired_hours_override" | "classe_day_cap_override"
+    kind: str  # "teoria_consecutive" | "ore_target_deviation" | "contractor_gap" | "classe_late_start" | "classe_late_start_over_1h" | "availability_override" | "single_classe_day" | "friday_late_start_override" | "pratica_block_override" | "paired_hours_override" | "classe_day_cap_override"
     description: str
     classe_id: Optional[str] = None
     docente_id: Optional[str] = None
@@ -1142,6 +1142,38 @@ class ScheduleSolver:
         # is now a HARD constraint (_constraint_day_capacity), not a soft
         # goal - there's no more "free hours" to minimize here.
         self._soft_classe_start_at_8()
+        self._soft_classe_late_start_over_1h()
+
+    def _soft_classe_late_start_over_1h(self) -> None:
+        """
+        Near-hard: a late ingresso costs LATE_HOUR_WEIGHT (1500, above
+        RELAX_WEIGHT and "classe_unfilled") per hour of delay from the
+        classe's earliest allowed start (8:00, or ora_inizio_min on a
+        staggered day): 1h late = 1500, 2h late = 3000 (so 1h weighs half of
+        2h), so the solver does it only when nothing else is feasible. Not a
+        hard cap: an extreme case must stay solvable. The ordinary
+        classe_late_start penalty (_soft_classe_start_at_8) also fires for any
+        late start, so it is netted out here to keep the totals exact.
+        """
+        LATE_HOUR_WEIGHT = 1500
+        late_base = self._soft_weights["classe_late_start"]
+        classe_nomi = {asg.classe_id: asg.classe_nome for asg in self.context.assegnazioni}
+
+        for (classe_id, giorno), starts_by_ora in self._classe_day_starts.items():
+            base = max(0, (self._ora_inizio_min_for_classe_giorno(classe_id, giorno) or 8) - 8)
+            terms = [(ora - base, start) for ora, start in starts_by_ora if ora - base >= 1 and ora != 0]
+            if not terms:
+                continue
+            cost = self.model.NewIntVar(0, max(d * LATE_HOUR_WEIGHT for d, _ in terms), f"late_cost_{classe_id}_{giorno}")
+            self.model.Add(cost == sum((d * LATE_HOUR_WEIGHT - late_base) * start for d, start in terms))
+            self.soft_penalties.append(SoftPenalty(
+                var=cost, weight=1, kind="classe_late_start_over_1h",
+                description=(
+                    f"Ingresso posticipato per {classe_nomi.get(classe_id, classe_id)} "
+                    f"({GIORNI_NOMI_IT[GiornoEnum(giorno).name]})"
+                ),
+                classe_id=classe_id, giorno=giorno,
+            ))
 
     def _soft_classe_start_at_8(self) -> None:
         """

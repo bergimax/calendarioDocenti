@@ -8,7 +8,7 @@ export const Route = createFileRoute("/menu")({
       { title: "Panoramica · Orario scolastico" },
       {
         name: "description",
-        content: "Menu principale: setup, disponibilità docenti, generazione orario e dati scuola.",
+        content: "Menu principale: disponibilità docenti, generazione orario e dati scuola.",
       },
       { property: "og:title", content: "Panoramica · Orario scolastico" },
       { property: "og:description", content: "Menu principale della piattaforma orari." },
@@ -32,11 +32,6 @@ const CARDS = [
     to: "/dati",
     title: "Dati scuola",
     desc: "Calendario, docenti, classi, assegnazioni, accoppiamenti.",
-  },
-  {
-    to: "/setup",
-    title: "Setup iniziale",
-    desc: "Carica calendario e anagrafiche, valida ed applica correzioni.",
   },
 ] as const;
 

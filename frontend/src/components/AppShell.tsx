@@ -7,7 +7,6 @@ const NAV = [
   { to: "/disponibilita", label: "Disponibilità" },
   { to: "/orario", label: "Orario" },
   { to: "/dati", label: "Dati scuola" },
-  { to: "/setup", label: "Setup iniziale" },
 ] as const;
 
 export function AppShell({

@@ -42,7 +42,7 @@ class MotivoConstraint:
 
 MOTIVO_CONSTRAINTS: Dict[str, MotivoConstraint] = {
     "classe_late_start": MotivoConstraint(
-        ("classe_late_start", "classe_early_start"), "classe_late_start",
+        ("classe_late_start", "classe_late_start_over_1h", "classe_early_start"), "classe_late_start",
         "Soft: a classe's day should start at 8:00.",
     ),
     "teoria_consecutive": MotivoConstraint(
