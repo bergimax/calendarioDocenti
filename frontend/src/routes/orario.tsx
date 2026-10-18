@@ -203,6 +203,7 @@ type FreeCell = { classe_id: string; classe_nome: string; giorno: string; ora: n
 type ConflictSelection = { chiavi: string[]; classe_id: string; giorno: string; ora: number };
 
 function SchedulePage() {
+  const queryClient = useQueryClient();
   const [week, setWeek] = useState("");
   const [schedule, setSchedule] = useState<Schedule | null>(null);
   const [generating, setGenerating] = useState(false);
@@ -266,6 +267,7 @@ function SchedulePage() {
       classId?: string | null | undefined;
       teacherId?: string | null | undefined;
       giorno?: string | null | undefined;
+      tutteSettimane?: boolean;
     },
   ) {
     try {
@@ -276,10 +278,12 @@ function SchedulePage() {
           class_id: opts?.classId ?? undefined,
           teacher_id: opts?.teacherId ?? undefined,
           giorno: opts?.giorno ?? undefined,
+          tutte_settimane: opts?.tutteSettimane ?? false,
         },
       });
       const updated = requireSchedule(res);
       setSchedule(updated);
+      void queryClient.invalidateQueries({ queryKey: ["deroghe"] });
       setNotice(`Deroga applicata · nuovo punteggio ${Math.round(updated.quality_score)}`);
     } catch (err) {
       setNotice(apiErrorMessage(err));
@@ -567,13 +571,99 @@ function SchedulePage() {
               onApplied={(updated, message) => {
                 setSchedule(updated);
                 setNotice(message);
+                void queryClient.invalidateQueries({ queryKey: ["deroghe"] });
               }}
               onError={setNotice}
             />
           ))}
         </div>
+
+        {active && !readOnly ? (
+          <DerogheAttive
+            week={week}
+            onRevoked={(updated) => {
+              setSchedule(updated);
+              setNotice("Deroga revocata · orario ricalcolato");
+            }}
+            onError={setNotice}
+          />
+        ) : null}
       </div>
     </AppShell>
+  );
+}
+
+type DerogaAttiva = {
+  id: string;
+  action_type: string;
+  classe_nome: string | null;
+  docente_nome: string | null;
+  giorno: string | null;
+  max_hours: number | null;
+  tutte_settimane: boolean;
+};
+
+// Deroghe granted so far: they all stay in force on every recalculation
+// (this week's own, plus those valid for all weeks) until revoked here.
+function DerogheAttive({
+  week,
+  onRevoked,
+  onError,
+}: {
+  week: string;
+  onRevoked: (schedule: Schedule) => void;
+  onError: (message: string) => void;
+}) {
+  const queryClient = useQueryClient();
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const deroghe = useQuery({
+    queryKey: ["deroghe", week],
+    queryFn: () => api<DerogaAttiva[]>(`/api/schedule/${week}/deroghe`),
+    enabled: !!week,
+    retry: false,
+  });
+  if (!deroghe.data?.length) return null;
+
+  async function revoke(id: string) {
+    setBusyId(id);
+    try {
+      const res = await api<ScheduleMutationResult>(`/api/schedule/${week}/deroghe/${id}`, {
+        method: "DELETE",
+      });
+      onRevoked(requireSchedule(res));
+      void queryClient.invalidateQueries({ queryKey: ["deroghe"] });
+    } catch (err) {
+      onError(apiErrorMessage(err));
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  return (
+    <div className="glass rounded-2xl p-4">
+      <div className="label-mono">Deroghe attive</div>
+      <ul className="mt-2 space-y-1 text-xs">
+        {deroghe.data.map((d) => (
+          <li key={d.id} className="flex items-center gap-2">
+            <span className="min-w-0 flex-1">
+              {QUICK_ACTIONS.find((a) => a.action_type === d.action_type)?.label ?? d.action_type}
+              {[d.docente_nome, d.classe_nome, d.giorno].filter(Boolean).map((x) => ` · ${x}`)}
+              {d.max_hours ? ` · max ${d.max_hours}h` : ""}
+              {" · "}
+              {d.tutte_settimane ? "tutte le settimane" : "solo questa settimana"}
+            </span>
+            <button
+              type="button"
+              className="font-semibold text-conflict"
+              disabled={busyId === d.id}
+              onClick={() => void revoke(d.id)}
+            >
+              {busyId === d.id ? "Revoco…" : "Revoca"}
+            </button>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 
@@ -596,10 +686,12 @@ function ConflictBand({
       classId?: string | null | undefined;
       teacherId?: string | null | undefined;
       giorno?: string | null | undefined;
+      tutteSettimane?: boolean;
     },
   ) => void;
 }) {
   const [confirmingId, setConfirmingId] = useState<string | null>(null);
+  const [tutteSettimane, setTutteSettimane] = useState(false);
   // solo ore in più/in meno del docente: avviso giallo, non conflitto
   const warningOnly = conflicts.length > 0 && conflicts.every((c) => c.avviso);
   return (
@@ -620,6 +712,14 @@ function ConflictBand({
                         <span className="text-muted-foreground">
                           Applicare &ldquo;{c.suggested_action.label}&rdquo;?
                         </span>
+                        <label className="inline-flex items-center gap-1 text-muted-foreground">
+                          <input
+                            type="checkbox"
+                            checked={tutteSettimane}
+                            onChange={(e) => setTutteSettimane(e.target.checked)}
+                          />
+                          Tutte le settimane
+                        </label>
                         <button
                           type="button"
                           className="font-semibold text-conflict"
@@ -629,6 +729,7 @@ function ConflictBand({
                               classId: c.classe_id,
                               teacherId: c.docente_id,
                               giorno: c.giorno,
+                              tutteSettimane,
                             });
                           }}
                         >
@@ -996,6 +1097,7 @@ function SidePanel({
       classId?: string | null | undefined;
       teacherId?: string | null | undefined;
       giorno?: string | null | undefined;
+      tutteSettimane?: boolean;
     },
   ) => void;
   selectedSlot: SlotLezione | null;
@@ -1006,6 +1108,7 @@ function SidePanel({
   onCellAssigned: (s: Schedule, message?: string) => void;
 }) {
   const [confirmingId, setConfirmingId] = useState<string | null>(null);
+  const [tutteSettimane, setTutteSettimane] = useState(false);
 
   return (
     <>
@@ -1048,6 +1151,14 @@ function SidePanel({
                       <span className="text-muted-foreground">
                         Applicare &ldquo;{c.suggested_action.label}&rdquo;?
                       </span>
+                      <label className="inline-flex items-center gap-1 text-muted-foreground">
+                        <input
+                          type="checkbox"
+                          checked={tutteSettimane}
+                          onChange={(e) => setTutteSettimane(e.target.checked)}
+                        />
+                        Tutte le settimane
+                      </label>
                       <button
                         type="button"
                         className="font-semibold text-conflict"
@@ -1057,6 +1168,7 @@ function SidePanel({
                             classId: c.classe_id,
                             teacherId: c.docente_id,
                             giorno: c.giorno,
+                            tutteSettimane,
                           });
                         }}
                       >
@@ -1246,6 +1358,7 @@ function QuickActionDialog({
   const [docenteId, setDocenteId] = useState("");
   const [giorno, setGiorno] = useState("");
   const [maxHours, setMaxHours] = useState(action.maxHoursDefault ? String(action.maxHoursDefault) : "");
+  const [tutteSettimane, setTutteSettimane] = useState(false);
   const [busy, setBusy] = useState(false);
 
   const teachers = useQuery({
@@ -1260,6 +1373,7 @@ function QuickActionDialog({
     setDocenteId("");
     setGiorno("");
     setMaxHours(action.maxHoursDefault ? String(action.maxHoursDefault) : "");
+    setTutteSettimane(false);
   }
 
   async function submit() {
@@ -1273,6 +1387,7 @@ function QuickActionDialog({
           teacher_id: docenteId || undefined,
           giorno: giorno || undefined,
           max_hours: maxHours ? Number(maxHours) : undefined,
+          tutte_settimane: tutteSettimane,
         },
       });
       const updated = requireSchedule(res);
@@ -1343,6 +1458,14 @@ function QuickActionDialog({
               placeholder={action.maxHoursPlaceholder}
             />
           ) : null}
+          <label className="flex items-center gap-2 text-xs">
+            <input
+              type="checkbox"
+              checked={tutteSettimane}
+              onChange={(e) => setTutteSettimane(e.target.checked)}
+            />
+            Vale per tutte le settimane (altrimenti solo questa)
+          </label>
         </div>
         <DialogFooter>
           <Button variant="ghost" onClick={() => setOpen(false)} disabled={busy}>

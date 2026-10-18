@@ -234,10 +234,27 @@ def apply_quick_action(
             teacher_id=request.teacher_id,
             giorno=request.giorno,
             max_hours=request.max_hours,
+            tutte_settimane=request.tutte_settimane,
         )
 
     except Exception as e:
         logger.error(f"Error applying quick action: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/schedule/{week_start}/deroghe")
+def list_deroghe(week_start: date, db: Session = Depends(get_db)):
+    """Deroghe in force for this week (its own plus those valid for every week)."""
+    return ScheduleService(db).list_deroghe(_get_current_school_id(), week_start)
+
+
+@router.delete("/schedule/{week_start}/deroghe/{deroga_id}")
+def revoke_deroga(week_start: date, deroga_id: str, db: Session = Depends(get_db)) -> Dict[str, Any]:
+    """Revoke a deroga and recalculate the week without it."""
+    try:
+        return ScheduleService(db).revoke_deroga(_get_current_school_id(), week_start, deroga_id)
+    except Exception as e:
+        logger.error(f"Error revoking deroga: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

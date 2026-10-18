@@ -296,6 +296,27 @@ class ConflittoGestito(Base):
     created_at = Column(DateTime, server_default=func.now())
 
 
+class DerogaAttiva(Base):
+    """
+    A deroga (quick-action relaxation of a rule) the admin granted, kept so
+    every later solve of the week remembers it - several can be active at
+    once (one per docente/classe/...). `settimana_inizio` NULL means it holds
+    for every week; otherwise only for that week. Same fields as
+    solver.DerogaConfig.
+    """
+    __tablename__ = "deroga_attiva"
+
+    id = Column(String, primary_key=True, default=lambda: str(__import__('uuid').uuid4()))
+    scuola_id = Column(String, ForeignKey("scuola.id"), nullable=False, index=True)
+    action_type = Column(String(60), nullable=False)
+    classe_id = Column(String, nullable=True)
+    docente_id = Column(String, nullable=True)
+    giorno = Column(Integer, nullable=True)  # GiornoEnum value 0-4
+    max_hours = Column(Integer, nullable=True)
+    settimana_inizio = Column(Date, nullable=True)  # NULL = tutte le settimane
+    created_at = Column(DateTime, server_default=func.now())
+
+
 class OrarioFeedback(Base):
     """
     An admin's rating of a generated weekly schedule (1-5 stars), with the

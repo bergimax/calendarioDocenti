@@ -259,6 +259,8 @@ class QuickActionRequest(BaseModel):
     teacher_id: Optional[str] = None
     giorno: Optional[str] = None  # "LUNEDI".."VENERDI", GiornoEnum member name
     max_hours: Optional[int] = None
+    # True: the deroga holds for every week, not only the one being edited
+    tutte_settimane: bool = False
     parameters: Optional[Dict[str, Any]] = None
 
 

@@ -684,3 +684,37 @@ def test_clicking_a_lesson_can_replace_the_docente(client, school_setup):
             and s["ora_inizio"] == target["ora_inizio"]]
     assert [s["docente_id"] for s in here] == [other["docente_id"]]
     assert len(now) >= n_before - 1
+
+
+def test_deroghe_are_remembered_across_resolves_and_can_be_revoked(client, school_setup):
+    """Several deroghe stay active together: authorizing a second docente
+    must not forget the first, and a plain regeneration keeps both."""
+    from datetime import date, timedelta
+
+    week = school_setup["week_start"]
+    other_week = str(date.fromisoformat(week) + timedelta(days=7))
+    names = school_setup["teachers_by_name"]
+    alfa, beta = names["Prof Alfa"], names["Prof Beta"]
+    assert client.post("/api/schedule/generate", json={"week_start": week}).json()["status"] == "generated"
+
+    for teacher_id, tutte in ((alfa, False), (beta, True)):
+        r = client.post(
+            f"/api/schedule/{week}/apply-quick-action",
+            json={"action_type": "override_availability", "teacher_id": teacher_id, "tutte_settimane": tutte},
+        )
+        assert r.status_code == 200 and r.json()["status"] == "applied", r.text
+
+    def active(w):
+        return {(d["docente_id"], d["tutte_settimane"]) for d in client.get(f"/api/schedule/{w}/deroghe").json()}
+
+    assert active(week) == {(alfa, False), (beta, True)}
+    # a plain regeneration does not drop them
+    client.post("/api/schedule/generate", json={"week_start": week})
+    assert active(week) == {(alfa, False), (beta, True)}
+    # only the "all weeks" one reaches another week
+    assert active(other_week) == {(beta, True)}
+
+    alfa_id = next(d["id"] for d in client.get(f"/api/schedule/{week}/deroghe").json() if d["docente_id"] == alfa)
+    r = client.delete(f"/api/schedule/{week}/deroghe/{alfa_id}")
+    assert r.status_code == 200 and r.json()["status"] == "applied", r.text
+    assert active(week) == {(beta, True)}

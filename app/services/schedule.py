@@ -733,6 +733,8 @@ class ScheduleService:
 
         # weights learned from the admin's ratings (defaults until any is applied)
         solver_kwargs.setdefault("soft_weights", SoftWeightService(self.db).active_weights())
+        # every deroga the admin granted for this week (or for all weeks)
+        solver_kwargs.setdefault("deroga", self._active_deroghe(context.scuola_id, context.week_start))
 
         def run(best_effort: bool, forced: bool = False):
             solver = ScheduleSolver(
@@ -1117,14 +1119,17 @@ class ScheduleService:
         teacher_id: Optional[str] = None,
         giorno: Optional[str] = None,
         max_hours: Optional[int] = None,
+        tutte_settimane: bool = False,
         timeout_seconds: int = 60,
     ) -> Dict[str, Any]:
         """
-        Apply a "deroga" (temporary exemption from one soft/hard rule) for
-        this week and re-solve, replacing the current schedule's slots in
-        place (same schedule_id) with the result.
+        Apply a "deroga" (exemption from one soft/hard rule), remember it
+        (this week only, or every week with `tutte_settimane`) and re-solve,
+        replacing the current schedule's slots in place (same schedule_id).
+        Deroghe granted earlier stay in force in every later solve.
         """
-        from app.domain.solver import DerogaConfig, GiornoEnum
+        from app.domain.solver import GiornoEnum
+        from app.models import DerogaAttiva
 
         if action_type not in QUICK_ACTIONS:
             return {"status": "error", "message": f"Unknown quick action: {action_type!r}"}
@@ -1132,21 +1137,114 @@ class ScheduleService:
         if giorno is not None and giorno not in GiornoEnum.__members__:
             return {"status": "error", "message": f"Invalid giorno: {giorno!r}"}
         giorno_idx = GiornoEnum[giorno].value if giorno is not None else None
+        settimana = None if tutte_settimane else week_start
 
-        deroga = DerogaConfig(
-            action_type=action_type, classe_id=class_id, docente_id=teacher_id,
-            giorno=giorno_idx, max_hours=max_hours,
-        )
-        return self._regenerate_in_place(
+        # Persist it first: every solve (this one and all later ones) reads
+        # the active deroghe, so earlier authorizations are not forgotten.
+        row = self.db.query(DerogaAttiva).filter(
+            DerogaAttiva.scuola_id == scuola_id,
+            DerogaAttiva.action_type == action_type,
+            DerogaAttiva.classe_id == class_id,
+            DerogaAttiva.docente_id == teacher_id,
+            DerogaAttiva.giorno == giorno_idx,
+            DerogaAttiva.settimana_inizio == settimana,
+        ).first()
+        created = row is None
+        previous_max = None if created else row.max_hours
+        if created:
+            row = DerogaAttiva(
+                scuola_id=scuola_id, action_type=action_type, classe_id=class_id,
+                docente_id=teacher_id, giorno=giorno_idx, settimana_inizio=settimana,
+            )
+            self.db.add(row)
+        row.max_hours = max_hours
+        self.db.commit()
+
+        result = self._regenerate_in_place(
             scuola_id, week_start,
             azione="QUICK_ACTION",
             dettagli={
                 "action_type": action_type, "class_id": class_id, "teacher_id": teacher_id,
-                "giorno": giorno, "max_hours": max_hours,
+                "giorno": giorno, "max_hours": max_hours, "tutte_settimane": tutte_settimane,
             },
             timeout_seconds=timeout_seconds,
-            deroga=deroga,
         )
+        if result.get("status") == "error":
+            # not applied: do not keep a deroga that produced no schedule
+            if created:
+                self.db.delete(row)
+            else:
+                row.max_hours = previous_max
+            self.db.commit()
+        return result
+
+    def _active_deroghe(self, scuola_id: str, week_start: date) -> list:
+        """The deroghe in force for `week_start`: those for this week plus those for every week."""
+        from app.domain.solver import DerogaConfig
+        from app.models import DerogaAttiva
+
+        rows = self.db.query(DerogaAttiva).filter(
+            DerogaAttiva.scuola_id == scuola_id,
+            (DerogaAttiva.settimana_inizio == None) | (DerogaAttiva.settimana_inizio == week_start),  # noqa: E711
+        ).order_by(DerogaAttiva.created_at).all()
+        return [
+            DerogaConfig(
+                action_type=r.action_type, classe_id=r.classe_id, docente_id=r.docente_id,
+                giorno=r.giorno, max_hours=r.max_hours,
+            )
+            for r in rows
+        ]
+
+    def list_deroghe(self, scuola_id: str, week_start: date) -> list:
+        """The active deroghe for the week, with names, for the UI list."""
+        from app.domain.solver import GiornoEnum, GIORNI_NOMI_IT
+        from app.models import DerogaAttiva, Classe, Docente
+
+        rows = self.db.query(DerogaAttiva).filter(
+            DerogaAttiva.scuola_id == scuola_id,
+            (DerogaAttiva.settimana_inizio == None) | (DerogaAttiva.settimana_inizio == week_start),  # noqa: E711
+        ).order_by(DerogaAttiva.created_at).all()
+        classi = {c.id: c.nome for c in self.db.query(Classe).filter(Classe.scuola_id == scuola_id)}
+        docenti = {d.id: d.nome for d in self.db.query(Docente).filter(Docente.scuola_id == scuola_id)}
+        return [
+            {
+                "id": r.id,
+                "action_type": r.action_type,
+                "classe_id": r.classe_id,
+                "classe_nome": classi.get(r.classe_id) if r.classe_id else None,
+                "docente_id": r.docente_id,
+                "docente_nome": docenti.get(r.docente_id) if r.docente_id else None,
+                "giorno": GiornoEnum(r.giorno).name if r.giorno is not None else None,
+                "max_hours": r.max_hours,
+                "tutte_settimane": r.settimana_inizio is None,
+            }
+            for r in rows
+        ]
+
+    def revoke_deroga(self, scuola_id: str, week_start: date, deroga_id: str) -> Dict[str, Any]:
+        """Remove a granted deroga and re-solve the week without it."""
+        from app.models import DerogaAttiva
+
+        row = self.db.query(DerogaAttiva).filter(
+            DerogaAttiva.id == deroga_id, DerogaAttiva.scuola_id == scuola_id,
+        ).first()
+        if not row:
+            return {"status": "error", "message": "Deroga non trovata"}
+        saved = dict(
+            scuola_id=row.scuola_id, action_type=row.action_type, classe_id=row.classe_id,
+            docente_id=row.docente_id, giorno=row.giorno, max_hours=row.max_hours,
+            settimana_inizio=row.settimana_inizio,
+        )
+        self.db.delete(row)
+        self.db.commit()
+        result = self._regenerate_in_place(
+            scuola_id, week_start, azione="REVOKE_DEROGA",
+            dettagli={"deroga_id": deroga_id, "action_type": saved["action_type"]},
+        )
+        if result.get("status") == "error":
+            self.db.add(DerogaAttiva(**saved))  # still in force: the week was not re-solved
+            self.db.commit()
+        return result
 
     def exclude_docente_day(
         self, scuola_id: str, week_start: date, docente_id: str, giorno: str,

@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from datetime import date, timedelta
-from typing import Any, Dict, List, Tuple, Optional, Set
+from typing import Any, Dict, List, Tuple, Optional, Set, Union
 from enum import Enum
 from ortools.sat.python import cp_model
 import logging
@@ -181,7 +181,7 @@ class ScheduleSolver:
     def __init__(
         self,
         context: ScheduleContext,
-        deroga: Optional[DerogaConfig] = None,
+        deroga: Optional[Union[DerogaConfig, List[DerogaConfig]]] = None,
         exclude_docente_giorno: Optional[Set[Tuple[str, int]]] = None,
         max_hours_per_docente: Optional[Dict[str, int]] = None,
         max_consecutive_teoria: Optional[int] = None,
@@ -229,7 +229,13 @@ class ScheduleSolver:
         if forced:
             self.best_effort = True
             self.allow_gaps = True
-        self.deroga = deroga
+        # Several deroghe can be active at once (one per docente/classe/...)
+        if deroga is None:
+            self.deroghe: List[DerogaConfig] = []
+        elif isinstance(deroga, DerogaConfig):
+            self.deroghe = [deroga]
+        else:
+            self.deroghe = list(deroga)
         self.exclude_docente_giorno = exclude_docente_giorno or set()
         self.max_hours_per_docente = max_hours_per_docente or {}
         self.max_consecutive_teoria = max_consecutive_teoria
@@ -341,23 +347,34 @@ class ScheduleSolver:
         self._constraint_chat_exclusions()
         self._constraint_chat_max_hours()
 
+    def _matching_deroga(
+        self, action_type: str, *, classe_id: str = None, docente_id: str = None, giorno: int = None,
+    ) -> Optional[DerogaConfig]:
+        """
+        The first active deroga requesting `action_type` that matches the
+        given classe/docente/giorno, or None. When a deroga is scoped to a
+        classe/docente/giorno it only matches that one (an unscoped deroga
+        applies to everyone/every day).
+        """
+        for d in self.deroghe:
+            if d.action_type != action_type:
+                continue
+            if d.classe_id and classe_id and d.classe_id != classe_id:
+                continue
+            if d.docente_id and docente_id and d.docente_id != docente_id:
+                continue
+            if d.giorno is not None and giorno is not None and d.giorno != giorno:
+                continue
+            return d
+        return None
+
     def _deroga_active(
         self, action_type: str, *, classe_id: str = None, docente_id: str = None, giorno: int = None,
     ) -> bool:
-        """
-        True if `self.deroga` requests relaxing `action_type` and, when the
-        deroga is scoped to a classe/docente/giorno, the given one matches
-        (an unscoped deroga applies to everyone/every day).
-        """
-        if not self.deroga or self.deroga.action_type != action_type:
-            return False
-        if self.deroga.classe_id and classe_id and self.deroga.classe_id != classe_id:
-            return False
-        if self.deroga.docente_id and docente_id and self.deroga.docente_id != docente_id:
-            return False
-        if self.deroga.giorno is not None and giorno is not None and self.deroga.giorno != giorno:
-            return False
-        return True
+        """True if some active deroga relaxes `action_type` for this classe/docente/giorno."""
+        return self._matching_deroga(
+            action_type, classe_id=classe_id, docente_id=docente_id, giorno=giorno,
+        ) is not None
 
     def _paired_assignment_pair(
         self, classe_a: str, classe_b: str, materia_id: str, docente_id: Optional[str]
@@ -1247,8 +1264,11 @@ class ScheduleSolver:
             # Deroga: "Forza N ore teoria" - raise the no-penalty cap (default
             # 3, or the admin-chosen value) for this classe/docente pair (or
             # every pair, on whichever side of the scope is left unset).
-            if self._deroga_active("force_3_hours_theory", classe_id=classe_id, docente_id=docente_id):
-                max_consecutive = self.deroga.max_hours or 3
+            deroga_teoria = self._matching_deroga(
+                "force_3_hours_theory", classe_id=classe_id, docente_id=docente_id,
+            )
+            if deroga_teoria:
+                max_consecutive = deroga_teoria.max_hours or 3
 
             for giorno in range(5):
                 # Check 3-hour windows (e.g., ora 0-1-2, 1-2-3, etc.)
@@ -1553,13 +1573,14 @@ class ScheduleSolver:
             # admin-chosen ceiling (or, if none was given, halve it as
             # before), steering the optimizer toward assigning them fewer
             # hours this run.
-            if (
-                self.context.docenti_map.get(asg.docente_id) == "CONTRATTO"
-                and self._deroga_active("reduce_contract_hours", docente_id=asg.docente_id)
-            ):
+            deroga_contratto = (
+                self._matching_deroga("reduce_contract_hours", docente_id=asg.docente_id)
+                if self.context.docenti_map.get(asg.docente_id) == "CONTRATTO" else None
+            )
+            if deroga_contratto:
                 ore_target = (
-                    max(1, min(ore_target, self.deroga.max_hours))
-                    if self.deroga.max_hours
+                    max(1, min(ore_target, deroga_contratto.max_hours))
+                    if deroga_contratto.max_hours
                     else max(1, ore_target // 2)
                 )
 
@@ -1572,7 +1593,7 @@ class ScheduleSolver:
             ):
                 target_detail += (
                     f", limitato a {ore_target}h dalla deroga sulle ore a contratto"
-                    if self.deroga and self.deroga.max_hours
+                    if deroga_contratto and deroga_contratto.max_hours
                     else ", dimezzato dalla deroga sulle ore a contratto"
                 )
 
