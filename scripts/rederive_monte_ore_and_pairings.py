@@ -19,7 +19,7 @@ app/domain/solver.py) numbers that are structurally capable of
 reconstructing that same near-full grid.
 
 ore_totali is set to the RESIDUAL need from today to scuola.data_fine_anno
-(weekly hour count x weeks remaining), not the full-year total - no docente
+(weekly hour count x weeks with lessons remaining: closures/stage/0-hour days excluded), not the full-year total - no docente
 has an ore_erogate history to subtract from a full-year figure (every
 existing OrarioSettimanale is still BOZZA, not a record of hours actually
 delivered), so the residual has to be the figure this script produces
@@ -69,7 +69,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.database import SessionLocal  # noqa: E402
 from app.domain.parser import SchoolRosterParser  # noqa: E402
-from app.models import Classe, ClasseAccoppiata, Docente, Materia, MonteOreAnnuale, Scuola  # noqa: E402
+from app.models import (  # noqa: E402
+    CalendarioAnnuale, Classe, ClasseAccoppiata, Docente, Materia, MonteOreAnnuale, Scuola,
+)
 
 PDF_PATH = Path(__file__).resolve().parent.parent / "Documenti" / "es_di_calendario.pdf"
 
@@ -81,6 +83,30 @@ def _resolve_cognome(cognome: str, known_cognomi: Set[str]) -> Optional[str]:
     return close[0] if close else None
 
 
+def _settimane_utili(righe, gruppo: Optional[str], classe_id: str, fallback: int) -> float:
+    """
+    Remaining school weeks in which the classe really has lessons, as lesson days / 5 - same rule
+    as SolverContext._settimane_utili in app/domain/solver.py: closures, 0-hour days and stage
+    (classe or whole gruppo) don't count. Falls back to calendar weeks when there are no rows.
+    """
+    if not righe:
+        return fallback
+    per_data = {}
+    for c in righe:
+        if c.data.weekday() >= 5:
+            continue
+        if gruppo is not None and c.gruppo == gruppo:
+            per_data[c.data] = c
+        elif c.gruppo is None and c.data not in per_data:
+            per_data[c.data] = c
+    giorni = sum(
+        1 for c in per_data.values()
+        if not (c.flag_chiusura or c.ore_max_giornata == 0 or c.flag_stage_gruppo
+                or c.flag_stage_classe_id == classe_id)
+    )
+    return max(giorni / 5, 1)
+
+
 def main(scuola_id: str = "sch_1") -> None:
     data = SchoolRosterParser.parse_orario_settimanale_pdf(PDF_PATH.read_bytes())
     slots = data["slots"]
@@ -89,6 +115,11 @@ def main(scuola_id: str = "sch_1") -> None:
     try:
         scuola = db.query(Scuola).filter_by(id=scuola_id).first()
         weeks_remaining = max(1, round((scuola.data_fine_anno - date.today()).days / 7))
+        righe_calendario = db.query(CalendarioAnnuale).filter(
+            CalendarioAnnuale.scuola_id == scuola_id,
+            CalendarioAnnuale.data >= date.today(),
+            CalendarioAnnuale.data <= scuola.data_fine_anno,
+        ).all()
 
         docenti = db.query(Docente).filter_by(scuola_id=scuola_id).all()
         docente_id_by_cognome: Dict[str, str] = {}
@@ -101,6 +132,7 @@ def main(scuola_id: str = "sch_1") -> None:
         classi = db.query(Classe).filter_by(scuola_id=scuola_id).all()
         classe_id_by_nome = {c.nome: c.id for c in classi}
         gruppo_by_nome = {c.nome: c.gruppo for c in classi}
+        gruppo_by_id = {c.id: c.gruppo for c in classi}
 
         materia = db.query(Materia).filter_by(scuola_id=scuola_id).first()
 
@@ -129,7 +161,10 @@ def main(scuola_id: str = "sch_1") -> None:
 
         n_updated, n_created, total_residual_hours = 0, 0, 0
         for (docente_id, classe_id), cells in weekly_hours.items():
-            ore_totali = len(cells) * weeks_remaining
+            weeks_classe = _settimane_utili(
+                righe_calendario, gruppo_by_id.get(classe_id), classe_id, weeks_remaining,
+            )
+            ore_totali = round(len(cells) * weeks_classe)
             total_residual_hours += ore_totali
             row = db.query(MonteOreAnnuale).filter_by(
                 scuola_id=scuola_id, docente_id=docente_id, classe_id=classe_id, materia_id=materia.id,
