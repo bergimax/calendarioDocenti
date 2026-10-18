@@ -5,7 +5,7 @@ import { AppShell } from "@/components/AppShell";
 import { Badge, Button, Select } from "@/components/ui-kit";
 import { ErrorState, LoadingState, Panel } from "@/components/States";
 import { api, apiErrorMessage } from "@/lib/api";
-import { weekLabel, weekLabelFor } from "@/lib/weeks";
+import { defaultWeek, weekLabel, weekLabelFor } from "@/lib/weeks";
 import type {
   AvailabilityStatus,
   Giorno,
@@ -85,8 +85,8 @@ function AvailabilityPage() {
   });
 
   useEffect(() => {
-    const first = weeks.data?.weeks[0];
-    if (!week && first) setWeek(first.start);
+    const start = defaultWeek(weeks.data?.weeks);
+    if (!week && start) setWeek(start);
   }, [weeks.data, week]);
 
   async function copyAllFromPrevious() {

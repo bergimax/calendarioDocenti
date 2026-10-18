@@ -1,8 +1,9 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { AppShell } from "@/components/AppShell";
 import { Badge, Button, Field, Select } from "@/components/ui-kit";
+import { Aiuto, ConfirmButton, StepGuide, currentStep, qualitaInParole } from "@/components/semplice";
 import { ErrorState, LoadingState } from "@/components/States";
 import {
   Dialog,
@@ -15,7 +16,7 @@ import {
 } from "@/components/ui/dialog";
 import { API_BASE_URL, api, apiBlob, apiErrorMessage, isSegreteria } from "@/lib/api";
 import { annoClasse } from "@/lib/classi";
-import { weekLabel, weekLabelFor } from "@/lib/weeks";
+import { defaultWeek, weekLabel, weekLabelFor } from "@/lib/weeks";
 import type {
   ChatMessage,
   Conflict,
@@ -102,7 +103,7 @@ const QUICK_ACTIONS: {
     action_type: "force_3_hours_theory",
     label: "Forza ore teoria",
     description:
-      "Di norma non si superano 2 ore consecutive di teoria dello stesso docente sulla stessa classe. Qui puoi autorizzare un tetto più alto per tutta la settimana.",
+      "Di norma non si superano 2 ore consecutive di teoria dello stesso docente sulla stessa classe. Qui puoi autorizzare un tetto più alto.",
     fields: ["classe", "docente", "max_hours"],
     maxHoursLabel: "Ore consecutive massime",
     maxHoursDefault: 3,
@@ -111,9 +112,9 @@ const QUICK_ACTIONS: {
     action_type: "reduce_contract_hours",
     label: "Riduci ore docente a contratto",
     description:
-      "Abbassa il monte ore target di questa settimana per un docente a contratto.",
+      "Abbassa il monte ore target per un docente a contratto.",
     fields: ["docente", "max_hours"],
-    maxHoursLabel: "Ore massime questa settimana",
+    maxHoursLabel: "Ore massime a settimana",
     maxHoursPlaceholder: "Vuoto = dimezza il target",
   },
   {
@@ -132,8 +133,8 @@ const QUICK_ACTIONS: {
   },
   {
     action_type: "override_availability",
-    label: "Deroga disponibilità",
-    description: "Ignora, solo per questa settimana, la disponibilità dichiarata dal docente.",
+    label: "Eccezione disponibilità",
+    description: "Ignora la disponibilità dichiarata dal docente.",
     fields: ["docente"],
   },
   {
@@ -220,6 +221,12 @@ function SchedulePage() {
     retry: false,
   });
 
+  // open on the next week to plan, without picking it by hand
+  useEffect(() => {
+    const start = defaultWeek(weeks.data?.weeks);
+    if (!week && start) setWeek(start);
+  }, [weeks.data, week]);
+
   const existing = useQuery({
     queryKey: ["schedule", week],
     queryFn: () => api<Schedule>(`/api/schedule/${week}`),
@@ -284,7 +291,7 @@ function SchedulePage() {
       const updated = requireSchedule(res);
       setSchedule(updated);
       void queryClient.invalidateQueries({ queryKey: ["deroghe"] });
-      setNotice(`Deroga applicata · nuovo punteggio ${Math.round(updated.quality_score)}`);
+      setNotice(`Eccezione applicata · nuovo punteggio ${Math.round(updated.quality_score)}`);
     } catch (err) {
       setNotice(apiErrorMessage(err));
     }
@@ -312,7 +319,7 @@ function SchedulePage() {
       setSchedule(requireSchedule(res));
       setConflictSel(null);
       setSelectedSlot(null);
-      setNotice(kind === "approve" ? "Conflitto approvato." : "Ora liberata.");
+      setNotice(kind === "approve" ? "Problema accettato." : "Ora liberata.");
     } catch (err) {
       setNotice(apiErrorMessage(err));
     }
@@ -365,6 +372,18 @@ function SchedulePage() {
   const readOnly = isSegreteria();
   const conflicts: Conflict[] = active?.conflicts ?? [];
   const approved = active?.stato === "APPROVATO";
+  // a week with no schedule yet answers 404 "No schedule found": not an error for the user
+  const noScheduleYet = existing.isError && /no schedule found/i.test(apiErrorMessage(existing.error));
+  const problemi = conflicts.filter((c) => !c.avviso);
+  const step = currentStep({ hasSchedule: Boolean(active), problems: problemi.length, approved });
+  const hints = [
+    week
+      ? "Premi «Genera orario»: il programma prepara l'orario della settimana (30-60 secondi)."
+      : "Scegli la settimana in alto, poi premi «Genera orario».",
+    `Ci sono ${problemi.length} problemi da sistemare. Per ognuno puoi consentire un'eccezione oppure correggere a mano la cella.`,
+    "Nessun problema: controlla l'orario e premi «Approva settimana» quando va bene.",
+    "Orario approvato. Esporta il PDF o l'Excel da dare ai docenti.",
+  ];
 
   return (
     <AppShell
@@ -390,7 +409,7 @@ function SchedulePage() {
             ))}
           </Select>
           {conflicts.filter((c) => !c.avviso).length ? (
-            <Badge tone="conflict">{conflicts.filter((c) => !c.avviso).length} conflitti</Badge>
+            <Badge tone="conflict">{conflicts.filter((c) => !c.avviso).length} da risolvere</Badge>
           ) : null}
           <Button variant="solid" onClick={exportPdf} disabled={!active}>
             Esporta PDF
@@ -433,12 +452,14 @@ function SchedulePage() {
               : "Nessun orario caricato"}
           </span>
           <div className="ml-auto flex items-center gap-2" hidden={readOnly}>
-            <Button onClick={() => generate("regenerate")} disabled={!week || generating}>
-              Genera da zero
-            </Button>
-            <Button variant="primary" onClick={approve} disabled={!active || approved}>
+            <ConfirmButton
+              variant="primary"
+              disabled={!active || approved}
+              domanda="Approvando, le ore vengono scalate dal monte ore dei docenti e l'orario non si può più modificare. Procedere?"
+              onConfirm={() => void approve()}
+            >
               {approved ? "Approvato" : "Approva settimana"}
-            </Button>
+            </ConfirmButton>
           </div>
         </>
       }
@@ -456,18 +477,31 @@ function SchedulePage() {
           />
         ) : null}
 
+        <StepGuide step={step} hint={hints[step] ?? ""} />
+
         <div className="flex items-start gap-3">
           <div className="flex-1">
             <div className="flex items-end justify-between">
               <div>
-                <div className="label-mono">Qualità orario</div>
+                <div className="label-mono">
+                  Com&apos;è l&apos;orario
+                  <Aiuto testo="Valutazione automatica: Ottimo, Buono o Da rivedere. Più cose rispetta tra quelle richieste, più è alta." />
+                </div>
                 <div className="mt-1 font-display text-4xl font-bold leading-none">
-                  {active?.quality_score != null ? Math.round(active.quality_score) : "—"}
-                  <span className="text-lg text-muted-foreground">/100</span>
+                  {qualitaInParole(active?.quality_score, problemi.length)}
+                  {active?.quality_score != null ? (
+                    <span className="ml-2 text-sm font-normal text-muted-foreground">
+                      {Math.round(active.quality_score)}/100
+                    </span>
+                  ) : null}
                 </div>
               </div>
-              <div className="label-mono">
-                {active?.quality_level ? `Livello ${active.quality_level}` : "In attesa del solver"}
+              <div className="text-right text-xs text-muted-foreground">
+                {active
+                  ? problemi.length
+                    ? `${problemi.length} ${problemi.length === 1 ? "problema" : "problemi"} da risolvere`
+                    : "Nessun problema"
+                  : "Nessun orario ancora"}
               </div>
             </div>
             <div className="mt-3 h-2 overflow-hidden rounded-full bg-edge">
@@ -478,15 +512,25 @@ function SchedulePage() {
             </div>
           </div>
           {readOnly ? null : (
-            <Button
+            <ConfirmButton
               variant="primary"
-              onClick={() => generate("generate")}
-              disabled={!week || generating}
+              disabled={!week || generating || approved}
+              skipConfirm={!active}
+              domanda="L'orario viene rifatto da capo: le modifiche fatte a mano su questa settimana andranno perse. Procedere?"
+              onConfirm={() => void generate("generate")}
             >
-              {generating ? "Solver in esecuzione…" : "Genera nuovo orario"}
-            </Button>
+              {generating ? "Calcolo in corso…" : active ? "Rigenera orario" : "Genera orario"}
+            </ConfirmButton>
           )}
         </div>
+
+        {!active && !generating && !genError && (!existing.isError || noScheduleYet) ? (
+          <div className="glass rounded-2xl p-6 text-center text-sm text-muted-foreground">
+            {week
+              ? "Per questa settimana non c'è ancora un orario. Premi «Genera orario» per prepararlo."
+              : "Scegli una settimana in alto per iniziare."}
+          </div>
+        ) : null}
 
         <div className="flex items-center gap-4 font-mono text-[11px] text-muted-foreground">
           <span className="flex items-center gap-1.5">
@@ -495,11 +539,11 @@ function SchedulePage() {
           </span>
           <span className="flex items-center gap-1.5">
             <i className="size-2.5 rounded-sm border border-conflict bg-conflict/20" />
-            Conflitto
+            Problema
           </span>
           <span className="flex items-center gap-1.5">
             <i className="size-2.5 rounded-sm border border-warn bg-warn/20" />
-            Ore in più/in meno
+            Ore in più o in meno (da controllare)
           </span>
           <span className="flex items-center gap-1.5">
             <i className="size-2.5 rounded-sm border border-unavailable bg-unavailable/20" />
@@ -511,7 +555,7 @@ function SchedulePage() {
           </span>
         </div>
 
-        {generating ? <LoadingState label="Il solver sta calcolando l'orario (30-60s)…" /> : null}
+        {generating ? <LoadingState label="Sto preparando l'orario (30-60 secondi)…" /> : null}
         {genError ? (
           <ErrorState
             error={genError}
@@ -519,7 +563,7 @@ function SchedulePage() {
             context="Generazione non riuscita"
           />
         ) : null}
-        {!generating && !genError && existing.isError && !schedule ? (
+        {!generating && !genError && existing.isError && !noScheduleYet && !schedule ? (
           <ErrorState
             error={existing.error}
             onRetry={() => void existing.refetch()}
@@ -560,30 +604,40 @@ function SchedulePage() {
           />
         ) : null}
 
-        <div className="flex flex-wrap items-center gap-2" hidden={readOnly}>
-          {QUICK_ACTIONS.map((a) => (
-            <QuickActionDialog
-              key={a.action_type}
-              action={a}
-              classi={classi}
-              week={week}
-              disabled={!active}
-              onApplied={(updated, message) => {
-                setSchedule(updated);
-                setNotice(message);
-                void queryClient.invalidateQueries({ queryKey: ["deroghe"] });
-              }}
-              onError={setNotice}
-            />
-          ))}
-        </div>
+        {!readOnly ? (
+          <details className="glass rounded-2xl p-4">
+            <summary className="cursor-pointer text-xs font-semibold">
+              Altre opzioni (per esperti)
+            </summary>
+            <p className="mt-2 text-xs text-muted-foreground">
+              Eccezioni alle regole decise a mano, senza aspettare che il programma le segnali.
+            </p>
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              {QUICK_ACTIONS.map((a) => (
+                <QuickActionDialog
+                  key={a.action_type}
+                  action={a}
+                  classi={classi}
+                  week={week}
+                  disabled={!active}
+                  onApplied={(updated, message) => {
+                    setSchedule(updated);
+                    setNotice(message);
+                    void queryClient.invalidateQueries({ queryKey: ["deroghe"] });
+                  }}
+                  onError={setNotice}
+                />
+              ))}
+            </div>
+          </details>
+        ) : null}
 
         {active && !readOnly ? (
           <DerogheAttive
             week={week}
             onRevoked={(updated) => {
               setSchedule(updated);
-              setNotice("Deroga revocata · orario ricalcolato");
+              setNotice("Eccezione revocata · orario ricalcolato");
             }}
             onError={setNotice}
           />
@@ -641,7 +695,10 @@ function DerogheAttive({
 
   return (
     <div className="glass rounded-2xl p-4">
-      <div className="label-mono">Deroghe attive</div>
+      <div className="label-mono">
+        Eccezioni attive
+        <Aiuto testo="Regole che hai deciso di non applicare. Restano valide a ogni ricalcolo finché non le revochi." />
+      </div>
       <ul className="mt-2 space-y-1 text-xs">
         {deroghe.data.map((d) => (
           <li key={d.id} className="flex items-center gap-2">
@@ -699,7 +756,7 @@ function ConflictBand({
       <div className="flex items-start gap-3">
         <div className="min-w-0 flex-1">
           <div className={`label-mono ${warningOnly ? "text-warn" : "text-conflict"}`}>
-            {warningOnly ? "Avviso" : "Conflitto"}
+            {warningOnly ? "Da controllare" : "Problema"}
           </div>
           <ul className="mt-1 space-y-1 text-xs">
             {conflicts.length ? (
@@ -718,7 +775,7 @@ function ConflictBand({
                             checked={tutteSettimane}
                             onChange={(e) => setTutteSettimane(e.target.checked)}
                           />
-                          Tutte le settimane
+                          Vale sempre
                         </label>
                         <button
                           type="button"
@@ -776,7 +833,7 @@ function ConflictBand({
         </div>
       </div>
       <p className="mt-2 text-[11px] text-muted-foreground">
-        Approva: {warningOnly ? "l'avviso sparisce" : "il conflitto sparisce"} e le ore tornano blu.
+        Approva: {warningOnly ? "l'avviso sparisce" : "il problema sparisce"} e le ore tornano blu.
         Rifiuta: la lezione viene tolta e l&apos;ora resta libera.
       </p>
     </div>
@@ -1137,10 +1194,10 @@ function SidePanel({
       ) : null}
 
       <div className="border-b border-edge px-4 py-3">
-        <div className="label-mono">Mancanze</div>
+        <div className="label-mono">Ore senza lezione</div>
         <div className="mt-2 space-y-2">
           {conflicts.length === 0 ? (
-            <p className="text-[11px] text-muted-foreground">Nessuna mancanza segnalata.</p>
+            <p className="text-[11px] text-muted-foreground">Nessuna ora scoperta.</p>
           ) : (
             conflicts.map((c) => (
               <div key={c.conflict_id} className="rounded-lg bg-conflict/5 p-2 ring-1 ring-conflict/20">
@@ -1157,7 +1214,7 @@ function SidePanel({
                           checked={tutteSettimane}
                           onChange={(e) => setTutteSettimane(e.target.checked)}
                         />
-                        Tutte le settimane
+                        Vale sempre
                       </label>
                       <button
                         type="button"
@@ -1198,8 +1255,13 @@ function SidePanel({
         </div>
       </div>
 
-      <FeedbackPanel week={week} schedule={schedule} />
-      <SoftWeightsPanel />
+      <details className="border-b border-edge">
+        <summary className="cursor-pointer px-4 py-3 text-xs font-semibold">
+          Voto e preferenze (avanzato)
+        </summary>
+        <FeedbackPanel week={week} schedule={schedule} />
+        <SoftWeightsPanel />
+      </details>
 
       {COPILOT_ENABLED ? (
         <ChatPanel week={week} schedule={schedule} onScheduleUpdate={onScheduleUpdate} />
@@ -1391,7 +1453,7 @@ function QuickActionDialog({
         },
       });
       const updated = requireSchedule(res);
-      onApplied(updated, `Deroga applicata · nuovo punteggio ${Math.round(updated.quality_score)}`);
+      onApplied(updated, `Eccezione applicata · nuovo punteggio ${Math.round(updated.quality_score)}`);
       setOpen(false);
       reset();
     } catch (err) {
@@ -1464,7 +1526,7 @@ function QuickActionDialog({
               checked={tutteSettimane}
               onChange={(e) => setTutteSettimane(e.target.checked)}
             />
-            Vale per tutte le settimane (altrimenti solo questa)
+            Vale sempre, non solo per questa settimana
           </label>
         </div>
         <DialogFooter>
@@ -1916,7 +1978,7 @@ function ChatPanel({
       <div className="min-h-0 flex-1 space-y-3 overflow-auto p-4 text-[13px]">
         {shown.length === 0 ? (
           <p className="text-[11px] text-muted-foreground">
-            Chiedi al copilota di spostare lezioni o risolvere conflitti in linguaggio naturale.
+            Chiedi al copilota di spostare lezioni o risolvere problemi in linguaggio naturale.
           </p>
         ) : null}
         {shown.map((m, i) =>
