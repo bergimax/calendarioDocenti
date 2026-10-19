@@ -217,20 +217,43 @@ def test_pratica_hours_scattered_across_a_day_score_worse_than_a_block():
     "pratica_block_override" conflict (the override the solver was forced
     to take to keep those fixed, non-contiguous hours feasible).
     """
+    # Theory assegnazioni fill every classroom hour that a1 leaves free: the
+    # classe's day capacity is a hard ==, so a layout is only feasible if all 30
+    # weekly hours are covered. Monday's leftover hours are split between two
+    # teachers so the filler itself never trips the "max 2 consecutive" rule and
+    # the only difference between the two layouts is the pratica block.
     assegnazioni = [
         AssegnazioneDati("a1", "d1", "Prof Bianchi", "ASSUNTO", "c1", "1A", "m2", "Lab",
                           "PRATICA", "MEDIO", ore_residue=20),
+        AssegnazioneDati("a2", "d1", "Prof Bianchi", "ASSUNTO", "c1", "1A", "m1", "Matematica",
+                          "TEORIA", "ALTO", ore_residue=24),
+        AssegnazioneDati("a3", "d2", "Prof Verdi", "ASSUNTO", "c1", "1A", "m1", "Matematica",
+                          "TEORIA", "ALTO", ore_residue=2),
+        AssegnazioneDati("a4", "d3", "Prof Neri", "ASSUNTO", "c1", "1A", "m1", "Matematica",
+                          "TEORIA", "ALTO", ore_residue=1),
     ]
-    ctx = _minimal_context(assegnazioni=assegnazioni, materie_map={"m2": "PRATICA"})
+    ctx = _minimal_context(
+        assegnazioni=assegnazioni, materie_map={"m1": "TEORIA", "m2": "PRATICA"},
+        docenti_map={"d1": "ASSUNTO", "d2": "ASSUNTO", "d3": "ASSUNTO"},
+    )
+
+    def fixed(lab_hours):
+        monday_free = [h for h in range(6) if h not in lab_hours]
+        return (
+            {("a1", 0, h) for h in lab_hours}
+            | {("a2", g, h) for g in range(1, 5) for h in range(6)}
+            | {("a3", 0, h) for h in monday_free[:2]}
+            | {("a4", 0, monday_free[2])}
+        )
 
     scattered = ScheduleSolver(ctx)
     scattered.build_model()
-    assert scattered.solve_fixed({("a1", 0, 0), ("a1", 0, 2), ("a1", 0, 4)}) in ("OPTIMAL", "FEASIBLE")
+    assert scattered.solve_fixed(fixed({0, 2, 4})) in ("OPTIMAL", "FEASIBLE")
     scattered_score, _, _ = scattered.calculate_quality_score()
 
     contiguous = ScheduleSolver(ctx)
     contiguous.build_model()
-    assert contiguous.solve_fixed({("a1", 0, 0), ("a1", 0, 1), ("a1", 0, 2)}) in ("OPTIMAL", "FEASIBLE")
+    assert contiguous.solve_fixed(fixed({0, 1, 2})) in ("OPTIMAL", "FEASIBLE")
     contiguous_score, _, _ = contiguous.calculate_quality_score()
 
     assert contiguous_score > scattered_score

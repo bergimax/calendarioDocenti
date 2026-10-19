@@ -54,7 +54,7 @@ def test_generated_schedule_slots_include_names(client, school_setup):
         assert s["materia_tipo"] in ("TEORIA", "PRATICA")
 
 
-def test_generated_schedule_pairs_shared_teacher(client, school_setup):
+def test_generated_schedule_pairs_shared_teacher(client, paired_school_setup):
     """
     Regression test: paired classes taught by the same docente
     (1A/1B on Matematica, both by Prof Alfa in the fixture) used to always
@@ -62,10 +62,11 @@ def test_generated_schedule_pairs_shared_teacher(client, school_setup):
     slot must have a matching slot for the other class, same time, same
     docente.
     """
-    week = school_setup["week_start"]
+    week = paired_school_setup["week_start"]
     r = client.post("/api/schedule/generate", json={"week_start": week})
     slots = r.json()["slots"]
     paired = [s for s in slots if s["accoppiata"]]
+    assert paired, "the fixture's 1A/1B pairing must produce paired lessons"
 
     by_time = {}
     for s in paired:
@@ -90,7 +91,7 @@ def test_generated_schedule_includes_itemized_conflicts(client, school_setup):
     assert body["n_soft_conflicts"] > 0, "fixture is expected to trigger real soft-constraint violations"
     assert body["conflicts"], "expected at least one itemized conflict"
 
-    valid_actions = {"force_3_hours_theory", "reduce_contract_hours", "authorize_early_exit", "override_availability"}
+    from app.services.schedule import QUICK_ACTIONS as valid_actions
     for c in body["conflicts"]:
         assert c["conflict_id"]
         assert isinstance(c["description"], str) and c["description"]
@@ -271,12 +272,12 @@ def test_modify_slot_identity_change_recalculates_score(client, school_setup):
     assert any(s["slot_id"] == slot["slot_id"] for s in body["slots"])
 
 
-def test_modify_slot_rejects_moving_only_one_side_of_a_pair(client, school_setup):
+def test_modify_slot_rejects_moving_only_one_side_of_a_pair(client, paired_school_setup):
     """1A/1B Matematica are accoppiate (paired) in the fixture, taught by the
     same docente at the same giorno/ora. Moving only one side must fail the
     hard pairing constraint instead of silently "succeeding" like the old
     placeholder did."""
-    week = school_setup["week_start"]
+    week = paired_school_setup["week_start"]
     paired_slot = next(s for s in _generated_slots(client, week) if s["accoppiata"])
 
     other_giorno = "MARTEDI" if paired_slot["giorno"] != "MARTEDI" else "MERCOLEDI"
@@ -366,14 +367,21 @@ def test_apply_quick_action_on_approved_schedule_is_locked(client, school_setup)
 
 
 def test_quick_action_override_availability_unlocks_contract_teacher(client, school_setup):
-    """Prof Beta is CONTRATTO with no recorded availability for the week, so
-    the hard availability constraint zeroes out every one of his slots on a
-    plain generation. The 'Deroga disponibilità' quick action, scoped to
-    him, should lift that and let the solver actually use him."""
+    """Prof Beta is CONTRATTO and the week's grid marks him unavailable
+    everywhere (a CONTRATTO teacher with no recorded grid gets a derived one,
+    so it has to be explicit), so the hard availability constraint zeroes out
+    every one of his slots on a plain generation. The 'Deroga disponibilità'
+    quick action, scoped to him, should lift that and let the solver use him."""
     week = school_setup["week_start"]
+    beta_id = school_setup["teachers_by_name"]["Prof Beta"]
+    grid = client.get(f"/api/availability/{week}/{beta_id}").json()["giorni_fasce"]
+    for day in grid.values():
+        for fascia in day:
+            fascia["disponibile"] = False
+    assert client.post(f"/api/availability/{week}/{beta_id}", json={"giorni_fasce": grid}).status_code == 200
+
     gen = client.post("/api/schedule/generate", json={"week_start": week}).json()
     assert gen["status"] == "generated"
-    beta_id = school_setup["teachers_by_name"]["Prof Beta"]
     assert not any(s["docente_id"] == beta_id for s in gen["slots"])
 
     r = client.post(
