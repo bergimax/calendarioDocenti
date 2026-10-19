@@ -88,7 +88,7 @@ def test_chat_send_exclude_day_actually_zeroes_out_that_day(client, school_setup
     )
 
 
-def test_chat_send_move_lesson_rejects_moving_only_one_side_of_a_pair(client, school_setup):
+def test_chat_send_move_lesson_rejects_moving_only_one_side_of_a_pair(client, paired_school_setup):
     """
     1A/1B are accoppiate on Matematica in the fixture (same docente, same
     giorno/ora). move_lesson only relocates the named class's own slot(s),
@@ -96,9 +96,9 @@ def test_chat_send_move_lesson_rejects_moving_only_one_side_of_a_pair(client, sc
     constraint modify_slot already enforces - not silently misreported as
     success, the way the old fake "+2 points" heuristic would have.
     """
-    week = school_setup["week_start"]
+    week = paired_school_setup["week_start"]
     gen, slots = _generated_slots(client, week)
-    matematica_slot = next(s for s in slots if s["materia_nome"] == "Matematica" and s["accoppiata"])
+    matematica_slot = next(s for s in slots if s["accoppiata"] and s["classe_nome"] == "1A")
     from_day = matematica_slot["giorno"]
     to_day = "MARTEDI" if from_day != "MARTEDI" else "MERCOLEDI"
 

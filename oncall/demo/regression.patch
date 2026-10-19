@@ -1,0 +1,14 @@
+--- a/app/services/schedule.py
++++ b/app/services/schedule.py
+@@ -720,10 +720,7 @@
+                 for f in fasce:
+                     if f.get("disponibile", True):
+                         continue
+-                    try:
+-                        unavailable.add((row.docente_id, giorno.upper(), int(f["ora_inizio"].split(":")[0])))
+-                    except (ValueError, KeyError, AttributeError):
+-                        continue
++                    unavailable.add((row.docente_id, giorno.upper(), int(f["ora_inizio"].split(":")[0])))
+         for s in slots:
+             s["indisponibile"] = any(
+                 (s["docente_id"], str(s["giorno"]).upper(), h) in unavailable

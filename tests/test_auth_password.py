@@ -56,3 +56,21 @@ def test_change_password_flow(real_client):
 def test_change_password_requires_login(real_client):
     r = real_client.post("/api/auth/change-password", json={"current_password": "a", "new_password": "bbbbbbbb"})
     assert r.status_code == 401
+
+
+def test_create_admin_works_on_a_fresh_database():
+    """Fresh install (`make up`): no scuola row exists yet, but the admin has an FK to it.
+    The script must create a placeholder school instead of failing."""
+    from app.database import SessionLocal
+    from app.models import Admin, Scuola
+    from scripts.create_admin import main
+
+    main("Demo@Example.com", "admin1234")
+
+    with SessionLocal() as db:
+        assert db.query(Scuola).filter_by(id="sch_1").count() == 1
+        assert db.query(Admin).filter_by(email="demo@example.com").one().scuola_id == "sch_1"
+
+    main("demo@example.com", "another-password")  # idempotent: updates, no duplicate
+    with SessionLocal() as db:
+        assert db.query(Admin).count() == 1

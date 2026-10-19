@@ -128,3 +128,33 @@ def school_setup(client, setup_file_data):
         "week_start": "2026-04-06",  # the Monday from setup_file_data, flagged as closure
         "teachers_by_name": teachers_by_name,
     }
+
+
+@pytest.fixture
+def paired_school_setup(school_setup):
+    """school_setup with the 1A/1B pairing owned by Prof Alfa. Setup CSVs don't carry
+    the pairing's docente (the "Dati scuola" screens set it), and a pairing is per
+    docente, so without this the fixture's lessons are all taught "Singola"."""
+    from app.database import SessionLocal
+    from app.models import ClasseAccoppiata
+    from app.services.tipo_lezione import normalize_tipo_lezione
+
+    with SessionLocal() as db:
+        for pair in db.query(ClasseAccoppiata).filter_by(scuola_id="sch_1").all():
+            pair.docente_id = school_setup["teachers_by_name"]["Prof Alfa"]
+        db.commit()
+        normalize_tipo_lezione(db)
+    return school_setup
+
+
+def pytest_collection_modifyitems(items):
+    """Tag integration tests (HTTP API / real files through the whole stack) so
+    `make test-unit` and `make test-integration` can run each layer on its own."""
+    for item in items:
+        name = item.path.name
+        if (
+            "client" in getattr(item, "fixturenames", ())
+            or name.startswith("test_api_")
+            or name in ("test_setup_upload_flow.py", "test_calendar_pdf_integration.py")
+        ):
+            item.add_marker(pytest.mark.integration)

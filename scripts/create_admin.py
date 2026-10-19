@@ -16,7 +16,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.database import Base, engine, SessionLocal, ensure_admin_role_column  # noqa: E402
-from app.models import Admin  # noqa: E402
+from datetime import date  # noqa: E402
+
+from app.models import Admin, Scuola  # noqa: E402
 from app.security import ROLES, hash_password  # noqa: E402
 
 
@@ -30,6 +32,15 @@ def main(email: str, password: str, scuola_id: str = "sch_1", ruolo: str = "ADMI
 
     db = SessionLocal()
     try:
+        if not db.query(Scuola).filter_by(id=scuola_id).first():
+            # Fresh install: the admin row has a FK to scuola. A placeholder school is
+            # enough; the setup wizard (POST /api/setup/save) updates it in place.
+            today = date.today()
+            db.add(Scuola(
+                id=scuola_id, nome="Nuova scuola", anno_formativo=f"{today.year}-{today.year + 1}",
+                data_inizio_anno=today, data_fine_anno=today.replace(year=today.year + 1),
+            ))
+            db.flush()
         admin = db.query(Admin).filter(Admin.email == email).first()
         if admin:
             admin.password_hash = hash_password(password)

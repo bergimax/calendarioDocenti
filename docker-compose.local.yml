@@ -1,0 +1,98 @@
+# Whole system with ONE command, no manual steps: `make up` (or
+# `docker compose -f docker-compose.local.yml up --build`).
+#   App:  http://localhost:8080   login: admin@example.com / admin1234 (demo only)
+#   API:  http://localhost:8080/docs
+# Production uses docker-compose.yml (see deploy/README.md).
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: calendario
+      POSTGRES_PASSWORD: calendario
+      POSTGRES_DB: calendario
+    volumes:
+      - pg_local:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U calendario"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  backend:
+    build: .
+    image: calendario-backend:local
+    environment:
+      DATABASE_URL: postgresql://calendario:calendario@postgres:5432/calendario
+      CORS_ORIGINS: '["http://localhost:8080"]'
+      ADMIN_EMAIL: admin@example.com
+      ADMIN_PASSWORD: admin1234
+      # Telemetry -> Grafana LGTM stack below (traces, metrics and logs share a trace id)
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://lgtm:4318
+      OTEL_SERVICE_NAME: calendario-backend
+      DEPLOY_ENV: local
+    # Seed the demo admin (idempotent), then start the API.
+    command: >
+      sh -c "python -m scripts.create_admin $$ADMIN_EMAIL $$ADMIN_PASSWORD &&
+             exec uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      lgtm:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://localhost:8000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  frontend:
+    build: ./frontend
+    image: calendario-frontend:local
+    depends_on:
+      - backend
+
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "8080:80"
+    volumes:
+      - ./deploy/Caddyfile.local:/etc/caddy/Caddyfile:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+      frontend:
+        condition: service_started
+
+  # Observability: OpenTelemetry collector + Tempo (traces) + Prometheus (metrics) +
+  # Loki (logs) + Grafana (UI and alerting) in one image. Grafana: http://localhost:3001
+  lgtm:
+    image: grafana/otel-lgtm:0.11.0
+    ports:
+      - "3001:3000"
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"   # local demo only
+      ENABLE_LOGS_GRAFANA: "true"
+    volumes:
+      - lgtm_data:/data
+      - ./observability/grafana/provisioning/alerting/oncall.yaml:/otel-lgtm/grafana/conf/provisioning/alerting/oncall.yaml:ro
+      - ./observability/grafana/provisioning/dashboards/calendario.yaml:/otel-lgtm/grafana/conf/provisioning/dashboards/calendario.yaml:ro
+      - ./observability/grafana/dashboards:/calendario-dashboards:ro
+
+  # Alert -> on-call agent: enriches Grafana alerts with recent error logs, then wakes the
+  # agent via GitHub repository_dispatch (dry-run unless GITHUB_TOKEN is set).
+  oncall-relay:
+    image: python:3.13-slim
+    command: ["python", "/app/relay.py"]
+    environment:
+      LOKI_URL: http://lgtm:3100
+      GITHUB_REPO: ${GITHUB_REPO:-bergimax/calendarioDocenti}
+      GITHUB_TOKEN: ${ONCALL_GITHUB_TOKEN:-}
+      GRAFANA_PUBLIC_URL: http://localhost:3001
+    volumes:
+      - ./oncall/relay.py:/app/relay.py:ro
+    ports:
+      - "8081:8080"
+
+volumes:
+  pg_local:
+  lgtm_data:

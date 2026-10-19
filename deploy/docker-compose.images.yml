@@ -1,0 +1,11 @@
+# Production override: run prebuilt images from GHCR (built by CI) instead of
+# building on the small VM. Used by .github/workflows/cd.yml:
+#   IMAGE_TAG=<git sha> docker compose -f docker-compose.yml -f deploy/docker-compose.images.yml \
+#     --env-file .env.production up -d
+services:
+  backend:
+    image: ghcr.io/bergimax/calendariodocenti-backend:${IMAGE_TAG:-latest}
+    pull_policy: always
+  frontend:
+    image: ghcr.io/bergimax/calendariodocenti-frontend:${IMAGE_TAG:-latest}
+    pull_policy: always

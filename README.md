@@ -1,123 +1,135 @@
-# Calendario Docenti
+# Calendario Docenti — AI-assisted school timetabling
 
-Piattaforma AI-powered per la generazione e gestione dell'orario scolastico settimanale
-(istituti superiori / IeFP). Combina un motore di ottimizzazione vincolata (OR-Tools
-CP-SAT) con un copilota conversazionale per la revisione dell'orario. Specifiche
-complete in [`specs.md`](specs.md).
+**Live demo:** https://130-110-14-231.sslip.io (login required; credentials on request)
+· **Docs for agents:** [AGENTS.md](AGENTS.md) · **Specs:** [specs.md](specs.md)
 
-Monorepo: backend in [`app/`](app), frontend in [`frontend/`](frontend).
+> The UI and domain vocabulary are Italian (docente = teacher, classe = class,
+> orario = timetable, deroga = waiver). All documentation is in English.
 
-## Struttura
+## The problem
 
-```
-app/                  Backend FastAPI (Python)
-  domain/             Logica di dominio pura: solver OR-Tools, parser CSV, validator, NLP chat
-  repositories/        Accesso al DB (SQLAlchemy), disaccoppiato dalla logica di dominio
-  services/            Orchestrazione business logic per route
-  routes/               Endpoint FastAPI (setup, availability, schedule, chat)
-  models.py             Modelli SQLAlchemy (schema PostgreSQL)
-  schemas.py            Modelli Pydantic per request/response
+A vocational training school (Italian *Agenzia Formativa*, IeFP / secondary level)
+must publish a **weekly timetable** every week of the school year. Doing it by hand in
+a spreadsheet takes hours and keeps breaking, because the rules interact:
 
-frontend/             Frontend React + TanStack Router/Query + Tailwind
-  src/routes/          Pagine: setup, disponibilità docenti, orario/dashboard
-  src/lib/api.ts        Client HTTP verso il backend
-```
+- each teacher teaches several classes and has a **residual yearly hour budget** per class
+  (*monte ore*) that must be consumed by the end of the year;
+- part-time teachers are available only on certain days/hours, full-time teachers always;
+- the **annual calendar** closes days, shortens days per year-group and sends classes on
+  work placement (*stage*) — those classes must get no lessons;
+- some lessons are taught to **two classes at once** (paired classes);
+- practical lessons must come in blocks of at least 3 hours, no teacher should have idle
+  gaps, Fridays must start at 08:00, etc.
 
-## Avvio backend
+## What the system does
 
-```bash
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+1. **Guided setup**: the admin uploads the school data (CSV / the annual calendar PDF /
+   teacher–class assignments); the system validates it and shows what needs fixing.
+2. **Teacher availability** per week (grid), or inferred from past timetables.
+3. **Timetable generation**: a CP-SAT constraint solver (Google OR-Tools) produces the
+   week respecting all hard rules, and optimises weighted soft rules. If the rules are
+   impossible to satisfy it says why; the admin can grant an explicit *deroga* (waiver)
+   for one rule and regenerate.
+4. **Review & edit**: quality score (A/B/C), itemised conflicts, move a lesson with live
+   validation, approve the week.
+5. **Export** the approved week as a PDF poster or Excel file.
+6. **Learning from ratings**: the admin rates each week 1–5 with reasons; low ratings
+   become *proposals* to raise the weight of the matching soft rule, approved by the admin.
 
-# Configura app/config.py / .env: DATABASE_URL punta a un'istanza PostgreSQL
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-```
+Expected behaviour: given valid data, generating a week returns in under a minute a
+timetable with **no double bookings, no lessons on closed/stage days and no teacher
+outside their availability**; every remaining soft-rule violation is listed. Roles:
+`ADMIN` (everything) and `SEGRETERIA` (read-only timetable + teacher availability).
+Details: [specs.md](specs.md).
 
-Documentazione interattiva su `http://localhost:8000/docs`. Tutti gli endpoint sono
-sotto il prefisso `/api` (es. `POST /api/schedule/generate`), tranne `GET /health`.
+## Run it locally (one command)
 
-### Test automatici (backend)
-
-```bash
-pip install -r requirements-dev.txt
-pytest
-```
-
-I test in [`tests/`](tests) girano contro un file SQLite temporaneo (nessun PostgreSQL
-richiesto) e coprono: solver OR-Tools (vincoli rigidi/soft, classi accoppiate, giorni di
-chiusura/stage), parsing NLP della chat, validazione dati di setup, parsing del
-calendario PDF (con un PDF sintetico generato al volo via reportlab, per non dipendere
-da file reali di una scuola), e tutti gli endpoint `/api/*` end-to-end (setup →
-disponibilità → generazione/approvazione orario → chat). Diversi test sono di
-regressione su bug già corretti (es. classi accoppiate mai schedulate, pesi dei vincoli
-soft ignorati, `scuola_id` non coerente dopo il setup).
-
-Nota: v1 è single-tenant e admin-only — non c'è ancora autenticazione, tutte le route
-usano una `scuola_id` fissa (`"sch_1"`) impostata durante `/api/setup/save`.
-
-## Avvio frontend
+Requires Docker with Compose v2.
 
 ```bash
-cd frontend
-npm install
-npm run dev
+make up          # builds and starts Postgres + backend + frontend + proxy + observability
 ```
 
-Il client legge l'URL del backend da `VITE_API_BASE_URL` (vedi `frontend/src/lib/api.ts`).
+| What | Where |
+|---|---|
+| App | http://localhost:8080 — demo login `admin@example.com` / `admin1234` |
+| API docs | http://localhost:8080/docs |
+| Grafana (metrics, traces, logs) | http://localhost:3001 (anonymous viewer) |
 
-## Deploy in produzione
+`make down` stops it. Data persists in a Docker volume.
 
-Vedi [`deploy/README.md`](deploy/README.md): Docker Compose (backend + frontend +
-Postgres + Caddy con HTTPS automatico), pensato per una VM gratuita (Oracle Cloud
-Always Free), passo-passo dalla creazione della VM alla messa online.
+### Without Docker
 
-## Stato del progetto
+```bash
+make install                                   # venv + dependencies
+.venv/bin/uvicorn app.main:app --reload        # backend, SQLite via DATABASE_URL in .env
+cd frontend && npm install && npm run dev      # frontend
+```
 
-- **Backend**: implementati setup/onboarding (parsing CSV **e PDF** + validazione +
-  salvataggio — vedi sotto), gestione disponibilità docenti, generazione orario via
-  OR-Tools (vincoli rigidi: niente doppie prenotazioni, capienza giornaliera per
-  classe/gruppo, classi accoppiate, disponibilità docenti, esclusione stage, esclusione
-  chiusure straordinarie, monte ore residuo; vincoli soft: max ore teoria consecutive,
-  distribuzione uniforme del monte ore nelle settimane residue, riduzione buche per i
-  contrattisti), approvazione orario, export PDF (placeholder), chat con parsing NLP a
-  pattern (senza LLM reale).
-- **Frontend**: pagine setup, disponibilità e orario/dashboard con copilota chat,
-  collegate al backend reale (non più mock).
-- Il flusso end-to-end (setup → disponibilità → generazione orario → approvazione →
-  export → chat) è stato verificato con dati di prova generati casualmente, incluso il
-  rispetto delle chiusure straordinarie e delle classi accoppiate.
-- Non ancora implementati: autenticazione/multi-tenant, memoria AI persistente delle
-  preferenze, azioni rapide di deroga e modifica-slot con ricalcolo reale, generazione
-  PDF effettiva (WeasyPrint), alcuni endpoint di comodo usati dal frontend
-  (`/api/teachers`, `/api/availability/weeks`, `/schedule/{week}/regenerate`).
+Use `.venv/bin/python` (system Python): Anaconda's Python segfaults with OR-Tools.
 
-### Calendario annuale: CSV o PDF (specs.md 3.1)
+## Tests
 
-`POST /api/calendar/upload` accetta sia CSV che **PDF**. Il parser PDF
-(`CalendarParser.parse_calendario_pdf`, in `app/domain/parser.py`) è scritto su misura
-per il layout "CALENDARIO AF" usato da questa scuola: una tabella con una riga per
-giorno scolastico e colonne di ore giornaliere per 5 gruppi-anno (PRIME/SECONDE/
-TERZE/QUARTE/PRIMA4+2). Funziona interamente offline (pdfplumber, nessuna chiave API
-richiesta), estraendo le parole per posizione (x, y) invece di affidarsi al
-riconoscimento automatico delle tabelle di pdfplumber, che su questo file unisce righe
-diverse; se in futuro cambia il template del calendario, le colonne x hardcoded in
-`CALENDARIO_PDF_GRUPPI_COLONNE` andranno riadattate.
+```bash
+make test               # everything (unit + integration), no external services needed
+make test-unit          # pure domain logic: solver, validator, parsers, auth
+make test-integration   # real FastAPI app + SQLite through the HTTP API
+```
 
-Ore diverse per gruppo-anno richiedono una `Classe` con un campo `gruppo` che
-corrisponda a una delle colonne (es. `PRIME`) — impostabile con una colonna opzionale
-`gruppo` nel CSV delle classi. Una `CalendarioAnnuale` con `gruppo=NULL` si applica a
-tutta la scuola (comportamento invariato per chi usa solo CSV); i giorni feriali assenti
-dalla tabella PDF vengono trattati come chiusura automaticamente.
+See [docs/testing.md](docs/testing.md). CI runs the same command on every pull request.
 
-Non estratte dal PDF (lasciate al CSV/all'admin): i periodi di tirocinio espliciti e gli
-eventi (riunioni, scrutini, ecc.) presenti nella tabella accanto — il loro effetto pratico
-sulla disponibilità delle classi coincide comunque con le celle vuote della griglia
-giornaliera, già gestite.
+## Architecture
 
-## Documentazione aggiuntiva
+```
+Browser ─HTTPS→ Caddy ─/api→ FastAPI backend ─→ PostgreSQL
+                     └─ /  → TanStack Start frontend (SSR)
+backend ─OTLP→ OpenTelemetry Collector → Tempo · Prometheus · Loki → Grafana → alerts
+```
 
-- [`specs.md`](specs.md) — specifiche funzionali complete
-- [`BACKEND_DESIGN.md`](BACKEND_DESIGN.md), [`FRONTEND_DESIGN.md`](FRONTEND_DESIGN.md) — design di dettaglio
-- [`QUICK_START.md`](QUICK_START.md) — guida ai test manuali del backend (alcuni esempi curl sono
-  antecedenti al prefisso `/api` e ad alcune correzioni recenti alle richieste, es. il body
-  JSON di `/api/schedule/generate`; fare riferimento a `/docs` per i contratti attuali)
+- **Backend** `app/`: FastAPI, SQLAlchemy, OR-Tools CP-SAT solver, WeasyPrint PDF export
+- **Frontend** `frontend/`: React 19, TanStack Router/Query, Tailwind
+- **Deploy** `deploy/`: Docker Compose + Caddy (automatic HTTPS) on an Oracle Cloud VM
+
+More in [docs/architecture.md](docs/architecture.md).
+
+## Delivery pipeline (CI/CD)
+
+- **CI** (`.github/workflows/ci.yml`): backend tests + frontend lint/build on every PR and push.
+- **CD** (`.github/workflows/cd.yml`): merge to `master` → images built → **dev** deployed
+  automatically → **production** deployed only after a manual approval.
+
+See [docs/deployment.md](docs/deployment.md).
+
+## Observability, alerting and on-call agent
+
+The backend emits **metrics, traces and structured JSON logs that share one trace ID**
+for the key user journey (*generate weekly timetable*), with no personal data. They are
+stored in Prometheus/Tempo/Loki and browsable in Grafana. An alert on **user impact**
+(timetable generation failing) wakes an **on-call agent** that investigates and opens a
+fix pull request. See [docs/observability.md](docs/observability.md) and
+[docs/oncall-agent.md](docs/oncall-agent.md).
+
+## How the project is built (agentic workflow)
+
+Work is specified as GitHub issues with acceptance criteria, implemented by a small team
+of AI agents with defined roles, and merged through PRs that reference the issues. See
+[docs/agent-team.md](docs/agent-team.md), [docs/process.md](docs/process.md) and the
+[issue tracker](https://github.com/bergimax/calendarioDocenti/issues).
+
+## Production
+
+Step-by-step VM setup (Oracle Cloud Always Free, Docker Compose, Caddy HTTPS, backups):
+[deploy/README.md](deploy/README.md) (Italian).
+
+## Repository layout
+
+```
+app/            backend (routes → services → repositories / domain)
+frontend/       web UI
+tests/          unit + integration tests
+deploy/         production compose helpers, Caddyfile, backups
+observability/  OpenTelemetry collector, Prometheus, Loki, Tempo, Grafana, alert rules
+oncall/         alert → on-call agent relay
+docs/           process, team, architecture, testing, deployment, observability
+specs.md        full functional specification (Italian)
+```
