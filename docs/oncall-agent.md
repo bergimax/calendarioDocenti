@@ -50,7 +50,7 @@ Grafana alert ──webhook──▶ oncall-relay ──repository_dispatch─�
 
 ## Setup (once)
 
-Repository secrets/settings: `ANTHROPIC_API_KEY` (required), `ONCALL_GH_TOKEN` (optional PAT so the
+Repository secrets/settings: `CLAUDE_CODE_OAUTH_TOKEN` (required; from `claude setup-token`, uses the Claude Pro/Max subscription, no API billing), `ONCALL_GH_TOKEN` (optional PAT so the
 agent's PR triggers CI — PRs opened with the default token do not). For the relay to dispatch for
 real, start the stack with `ONCALL_GITHUB_TOKEN=<fine-grained PAT, Contents: write on this repo>`.
 Install the Claude GitHub app on the repo.
