@@ -1,3 +1,7 @@
+from app.observability import configure_logging, setup_observability
+
+configure_logging()  # JSON logs from the very first import
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
@@ -24,6 +28,9 @@ app = FastAPI(
     version=settings.API_VERSION,
     debug=settings.DEBUG
 )
+
+# OTLP export + request/DB auto-instrumentation (no-op unless OTEL_EXPORTER_OTLP_ENDPOINT is set)
+setup_observability(app, engine)
 
 # CORS middleware. allow_credentials is False because auth is a bearer
 # token in the Authorization header (see app/security.py), not a cookie -

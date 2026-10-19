@@ -1,0 +1,69 @@
+apiVersion: 1
+
+# Contact point: the on-call relay (oncall/relay.py), which enriches the alert with
+# recent error logs and wakes the on-call agent (GitHub Actions, see docs/oncall-agent.md).
+contactPoints:
+  - orgId: 1
+    name: oncall-agent
+    receivers:
+      - uid: oncall-agent-webhook
+        type: webhook
+        settings:
+          url: http://oncall-relay:8080/alert
+          httpMethod: POST
+
+policies:
+  - orgId: 1
+    receiver: oncall-agent
+    group_by: ["alertname"]
+    group_wait: 5s
+    group_interval: 1m
+    repeat_interval: 4h
+
+groups:
+  - orgId: 1
+    name: user-impact
+    folder: Calendario Docenti
+    interval: 10s
+    rules:
+      - uid: schedule-generation-failing
+        title: Timetable generation failing
+        condition: C
+        for: 0s
+        noDataState: OK
+        execErrState: OK
+        data:
+          - refId: A
+            relativeTimeRange: { from: 300, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: sum(increase(schedule_generation_total{outcome="internal_error"}[5m]))
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: reduce
+              expression: A
+              reducer: last
+              datasource: { type: __expr__, uid: __expr__ }
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+              datasource: { type: __expr__, uid: __expr__ }
+        annotations:
+          summary: Admins cannot generate the weekly timetable (unexpected error)
+          description: >-
+            At least one timetable generation ended in an unexpected internal error in the
+            last 5 minutes. Users see "Internal error" instead of a timetable.
+          runbook: docs/oncall-agent.md
+        labels:
+          severity: critical
+          service: calendario-backend
+          journey: schedule-generation

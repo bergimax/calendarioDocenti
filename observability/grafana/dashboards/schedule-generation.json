@@ -1,0 +1,49 @@
+{
+  "uid": "schedule-generation",
+  "title": "User journey: weekly timetable generation",
+  "tags": ["calendario-docenti"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "10s",
+  "time": { "from": "now-30m", "to": "now" },
+  "panels": [
+    {
+      "id": 1, "type": "timeseries", "title": "Generations per minute by outcome",
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "sum by (outcome) (increase(schedule_generation_total[1m]))", "legendFormat": "{{outcome}}" }]
+    },
+    {
+      "id": 2, "type": "stat", "title": "Failed generations (last 5m)",
+      "gridPos": { "x": 12, "y": 0, "w": 6, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "sum(increase(schedule_generation_total{outcome=\"internal_error\"}[5m]))" }],
+      "fieldConfig": { "defaults": { "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] } } }
+    },
+    {
+      "id": 3, "type": "timeseries", "title": "Generation duration p95 (s)",
+      "gridPos": { "x": 18, "y": 0, "w": 6, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "histogram_quantile(0.95, sum by (le) (rate(schedule_generation_duration_seconds_bucket[5m])))", "legendFormat": "p95" }]
+    },
+    {
+      "id": 4, "type": "timeseries", "title": "HTTP requests by status (all endpoints)",
+      "gridPos": { "x": 12, "y": 4, "w": 6, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "sum by (http_response_status_code) (rate(http_server_duration_milliseconds_count[1m]))", "legendFormat": "{{http_response_status_code}}" }]
+    },
+    {
+      "id": 5, "type": "logs", "title": "Journey logs (structured, with trace_id: click a line, then the trace link)",
+      "gridPos": { "x": 0, "y": 8, "w": 24, "h": 9 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [{ "refId": "A", "expr": "{service_name=\"calendario-backend\"} | logger = `app.journey.schedule_generate` or `schedule_generation`" }],
+      "options": { "showTime": true, "wrapLogMessage": true, "sortOrder": "Descending" }
+    },
+    {
+      "id": 6, "type": "traces", "title": "Recent schedule.generate traces",
+      "gridPos": { "x": 0, "y": 17, "w": 24, "h": 8 },
+      "datasource": { "type": "tempo", "uid": "tempo" },
+      "targets": [{ "refId": "A", "queryType": "traceql", "query": "{ name = \"schedule.generate\" }", "limit": 20 }]
+    }
+  ]
+}

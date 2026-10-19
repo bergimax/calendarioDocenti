@@ -33,6 +33,18 @@ class ScheduleService:
     def generate_schedule(
         self, scuola_id: str, week_start: date, timeout_seconds: int = 60
     ) -> ScheduleGenerateResponse:
+        """Generate the weekly schedule, traced/metered as the key user journey
+        (see app/observability.py)."""
+        from app.observability import generation_journey
+
+        with generation_journey(str(week_start)) as journey:
+            result = self._generate_schedule(scuola_id, week_start, timeout_seconds, journey)
+            journey.finish(result.status, len(result.slots) if result.slots else 0)
+            return result
+
+    def _generate_schedule(
+        self, scuola_id: str, week_start: date, timeout_seconds: int, journey,
+    ) -> ScheduleGenerateResponse:
         """
         Generate optimal weekly schedule.
 
@@ -163,6 +175,7 @@ class ScheduleService:
 
         except Exception as e:
             logger.error(f"Unexpected error: {e}", exc_info=True)
+            journey.internal_error(e)
             return ScheduleGenerateResponse(
                 status="error",
                 message=f"Internal error: {str(e)}",
